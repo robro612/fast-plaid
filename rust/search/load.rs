@@ -152,13 +152,13 @@ fn ensure_tensor(t: PyTensor, device: Device, kind: Kind) -> Tensor {
 /// * `device` - The target device string (e.g. "cuda:0").
 /// * `low_memory` - If true, keeps document data on CPU.
 /// * `centroid_index` - IVF centroid probing backend: `"dense"`/`"brute"` (exact matmul),
-///   or `"hnsw"` / `"faiss_hnsw"` (Faiss HNSW over centroid rows when fast_plaid_rust is built
-///   with Cargo feature `hnsw` and libfaiss is available). Legacy alias `"cagra"` selects the
-///   same HNSW backend. Case-insensitive. `None` selects the default dense backend.
-/// * `centroid_index_params` - Optional dict of backend-specific
-///   parameters. For HNSW: `m` or `graph_degree`, `ef_construction` or
-///   `intermediate_graph_degree`, `ef_search` or `itopk_size`.
-///   Parameters `build_algo` and `search_width` are rejected (CAGRA-only). Unknown keys raise.
+///   or `"cagra"` (GPU CAGRA graph over centroid rows when fast_plaid_rust is built with
+///   Cargo feature `cagra` and cuVS is available). Case-insensitive. `None` selects the
+///   default dense backend.
+/// * `centroid_index_params` - Optional dict of backend-specific parameters for CAGRA.
+///   Recognized keys (all integers): `graph_degree`, `intermediate_graph_degree`,
+///   and `itopk_size`. Unknown keys raise. Passing params with
+///   `centroid_index="dense"` / `"brute"` is an error.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn construct_index(

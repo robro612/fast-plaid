@@ -340,13 +340,15 @@ def _construct_index_from_tensors(
     low_memory:
         If True, keeps large document tensors on CPU to save VRAM.
     centroid_index:
-        Backend for the centroid lookup. One of ``"dense"`` (default),
-        ``"hnsw"`` / ``"faiss_hnsw"``, or legacy ``"cagra"`` (HNSW).
+        Backend for the centroid lookup. One of ``"dense"`` (default) or
+        ``"cagra"`` (GPU CAGRA graph over centroid rows when the Rust extension
+        is built with the ``cagra`` Cargo feature and cuVS is available).
         ``None`` uses the default.
     centroid_index_params:
-        Backend-specific parameter overrides for HNSW: ``m`` /
-        ``graph_degree``, ``ef_construction`` / ``intermediate_graph_degree``,
-        ``ef_search`` / ``itopk_size``. Unknown keys raise.
+        Backend-specific parameter overrides for CAGRA. Recognized integer keys:
+        ``graph_degree``, ``intermediate_graph_degree``, and ``itopk_size``.
+        Passing params with ``centroid_index="dense"`` (or ``"brute"``) is an
+        error. Unknown keys raise.
 
     """
     gpu_data: dict[str, Any] = {}

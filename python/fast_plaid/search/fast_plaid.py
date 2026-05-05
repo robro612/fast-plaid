@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from typing import Self
 
 import numpy as np
-import torch
 from fast_plaid import fast_plaid_rust
+import torch
 from filelock import FileLock
 from filelock import Timeout as FileLockTimeout
 from joblib import Parallel, delayed
@@ -346,20 +346,17 @@ class FastPlaid:
             Whether to use low memory mode when loading the index.
         centroid_index:
             Backend for the centroid lookup at search time. One of
-            ``"dense"`` (default; brute-force ``centroids @ q.T``),
-            ``"hnsw"`` / ``"faiss_hnsw"`` (Faiss HNSW graph over centroid rows
-            when the Rust extension is built with the ``hnsw`` Cargo feature
-            and the Faiss C library is installed), or legacy ``"cagra"`` as an
-            alias for the same HNSW backend. Without the feature or Faiss,
-            configuring these graph backends raises a descriptive error.
-            ``None`` uses the default.
+            ``"dense"`` (default; brute-force ``centroids @ q.T``) or
+            ``"cagra"`` (GPU CAGRA graph over centroid rows when the Rust
+            extension is built with the ``cagra`` Cargo feature and cuVS is
+            available). ``None`` uses the default.
         centroid_index_params:
-            Backend-specific parameter overrides. Only meaningful for HNSW /
-            ``cagra``. Recognized keys: ``m`` (alias ``graph_degree``, default
-            32), ``ef_construction`` (alias ``intermediate_graph_degree``,
-            default 40), ``ef_search`` (alias ``itopk_size``, default 64).
-            Keys ``build_algo`` and ``search_width`` (CAGRA-only) raise.
-            Unknown keys raise.
+            Backend-specific parameter overrides for CAGRA. Recognized integer
+            keys: ``graph_degree`` (final graph degree), ``intermediate_graph_degree``
+            (intermediate kNN graph degree), and ``itopk_size`` (beam width /
+            number of intermediate candidates). Passing params with
+            ``centroid_index="dense"`` (or ``"brute"``) is an error. Unknown
+            keys raise.
         kwargs:
             Additional keyword arguments.
 

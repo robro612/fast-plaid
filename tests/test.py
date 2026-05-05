@@ -8,32 +8,28 @@ import torch
 from fast_plaid import filtering, search
 
 
-def _handle_hnsw_construct_failure(exc: BaseException) -> None:
+def _handle_cagra_construct_failure(exc: BaseException) -> None:
     """Re-raise, pytest.skip, or fail depending on env and error text."""
-    if os.environ.get("FASTPLAID_REQUIRE_HNSW") == "1":
+    if os.environ.get("FASTPLAID_REQUIRE_CAGRA") == "1":
         raise AssertionError(
-            "FASTPLAID_REQUIRE_HNSW=1 but Faiss HNSW centroid index could not be built."
+            "FASTPLAID_REQUIRE_CAGRA=1 but CAGRA centroid index could not be built."
         ) from exc
 
     msg_l = str(exc).lower()
     if "unknown centroid_index kind" in msg_l:
         raise AssertionError(
-            "fast_plaid_rust is too old to recognize centroid_index='hnsw'; rebuild the extension."
+            "fast_plaid_rust is too old to recognize centroid_index='cagra'; rebuild the extension."
         ) from exc
 
     skip_hints = (
         "requires rebuilding fast_plaid_rust with the cargo feature",
-        "maturin develop --features hnsw",
-        "libfaiss",
-        "lfaiss",
-        "unable to find library -lfaiss",
-        "failed to build faiss hnsw",
-        "indexbuilder hnsw build failed",
-        "is libfaiss installed",
-        "set_index_parameters",
+        "maturin develop --features cagra",
+        "cuvs",
+        "cagra",
+        "failed to build cagra",
     )
     if any(h in msg_l for h in skip_hints):
-        pytest.skip(f"Faiss HNSW centroid backend not usable in this environment: {exc}")
+        pytest.skip(f"CAGRA centroid backend not usable in this environment: {exc}")
 
     # ``FastPlaid.search`` reloads the Rust index; if ``construct_index`` fails for
     # ``centroid_index='hnsw'``, loaders print a warning and the device slot stays
@@ -1435,15 +1431,14 @@ class TestCentroidIndexBackend:
 
     @staticmethod
     def _assert_graph_centroid_index_unavailable(exc: BaseException) -> None:
-        """Graph centroid index without the hnsw feature (or Faiss) must fail clearly."""
+        """Graph centroid index without the cagra feature (or cuVS) must fail clearly."""
         msg = str(exc).lower()
-        assert any(x in msg for x in ("hnsw", "cagra", "cargo feature", "faiss"))
+        assert any(x in msg for x in ("cagra", "cargo feature", "cuvs"))
         assert any(
             k in msg
             for k in (
                 "cargo feature",
-                "faiss",
-                "libfaiss",
+                "cuvs",
             )
         )
 
@@ -1497,28 +1492,8 @@ class TestCentroidIndexBackend:
                 centroid_index="not-a-real-backend",
             )
 
-    def test_hnsw_without_feature_or_faiss_fails(self, test_index_path):
-        """Selecting graph ANN on CPU fails when the extension lacks hnsw / Faiss."""
-        self._build_and_search(test_index_path, centroid_index=None)
-
-        from fast_plaid.search.load import (
-            _construct_index_from_tensors,
-            _load_index_tensors_cpu,
-        )
-
-        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
-        for kind in ("hnsw", "cagra"):
-            with pytest.raises(Exception) as ei:
-                _construct_index_from_tensors(
-                    data=cpu_tensors,
-                    device="cpu",
-                    low_memory=False,
-                    centroid_index=kind,
-                )
-            self._assert_graph_centroid_index_unavailable(ei.value)
-
-    def test_hnsw_params_validate_before_backend_fail(self, test_index_path):
-        """Valid HNSW param dict parses; load still fails without feature or Faiss."""
+    def test_cagra_without_feature_or_cuvs_fails(self, test_index_path):
+        """Selecting graph ANN on CPU fails when the extension lacks cagra / cuVS."""
         self._build_and_search(test_index_path, centroid_index=None)
 
         from fast_plaid.search.load import (
@@ -1532,17 +1507,36 @@ class TestCentroidIndexBackend:
                 data=cpu_tensors,
                 device="cpu",
                 low_memory=False,
-                centroid_index="hnsw",
+                centroid_index="cagra",
+            )
+        self._assert_graph_centroid_index_unavailable(ei.value)
+
+    def test_cagra_params_validate_before_backend_fail(self, test_index_path):
+        """Valid CAGRA param dict parses; load still fails without feature or cuVS."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception) as ei:
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="cagra",
                 centroid_index_params={
-                    "m": 32,
-                    "ef_construction": 64,
-                    "ef_search": 128,
+                    "graph_degree": 32,
+                    "intermediate_graph_degree": 64,
+                    "itopk_size": 128,
                 },
             )
         self._assert_graph_centroid_index_unavailable(ei.value)
 
-    def test_hnsw_params_unknown_key_raises(self, test_index_path):
-        """Unknown HNSW param keys raise before the Faiss build step."""
+    def test_cagra_params_unknown_key_raises(self, test_index_path):
+        """Unknown CAGRA param keys raise."""
         self._build_and_search(test_index_path, centroid_index=None)
 
         from fast_plaid.search.load import (
@@ -1556,12 +1550,12 @@ class TestCentroidIndexBackend:
                 data=cpu_tensors,
                 device="cpu",
                 low_memory=False,
-                centroid_index="hnsw",
+                centroid_index="cagra",
                 centroid_index_params={"graph_dgree": 32},
             )
 
-    def test_hnsw_rejects_legacy_cagra_only_params(self, test_index_path):
-        """CAGRA-only params are rejected with a helpful message."""
+    def test_cagra_params_m_too_small_raises(self, test_index_path):
+        """CAGRA graph_degree must be >= 2."""
         self._build_and_search(test_index_path, centroid_index=None)
 
         from fast_plaid.search.load import (
@@ -1570,32 +1564,13 @@ class TestCentroidIndexBackend:
         )
 
         cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
-        with pytest.raises(Exception, match="removed NVIDIA CAGRA"):
+        with pytest.raises(Exception, match="graph_degree must be >="):
             _construct_index_from_tensors(
                 data=cpu_tensors,
                 device="cpu",
                 low_memory=False,
-                centroid_index="hnsw",
-                centroid_index_params={"build_algo": "hnsw"},
-            )
-
-    def test_hnsw_params_m_too_small_raises(self, test_index_path):
-        """HNSW M must be >= 2."""
-        self._build_and_search(test_index_path, centroid_index=None)
-
-        from fast_plaid.search.load import (
-            _construct_index_from_tensors,
-            _load_index_tensors_cpu,
-        )
-
-        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
-        with pytest.raises(Exception, match="m .*graph_degree.* must be >="):
-            _construct_index_from_tensors(
-                data=cpu_tensors,
-                device="cpu",
-                low_memory=False,
-                centroid_index="hnsw",
-                centroid_index_params={"m": 1},
+                centroid_index="cagra",
+                centroid_index_params={"graph_degree": 1},
             )
 
     def test_dense_with_params_raises(self, test_index_path):
@@ -1618,28 +1593,38 @@ class TestCentroidIndexBackend:
             )
 
 
-@pytest.mark.faiss_hnsw
-class TestCentroidIndexHnswLive:
-    """Faiss HNSW centroid construction + search (opt-in runtime).
+@pytest.mark.cagra
+class TestCentroidIndexCagraLive:
+    """CAGRA centroid construction + search (opt-in runtime).
 
-    Requires ``fast_plaid_rust`` built with ``--features hnsw`` and a working
-    ``libfaiss`` / ``libfaiss_c`` on ``LD_LIBRARY_PATH`` (or standard install paths).
+    Requires ``fast_plaid_rust`` built with ``--features cagra`` and a working
+    cuVS installation.
 
-    Otherwise tests **skip**. Set ``FASTPLAID_REQUIRE_HNSW=1`` to turn missing Faiss
-    into a hard failure (e.g. CI with Faiss present).
+    Otherwise tests **skip**. Set ``FASTPLAID_REQUIRE_CAGRA=1`` to turn missing CAGRA
+    into a hard failure (e.g. CI with cuVS present).
     """
 
-    _HNSW_PARAMS = {"m": 16, "ef_construction": 64, "ef_search": 128}
+    _CAGRA_PARAMS = {
+        "graph_degree": 16,
+        "intermediate_graph_degree": 64,
+        "itopk_size": 128,
+    }
+
+    @staticmethod
+    def _require_cuda() -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("CAGRA requires CUDA (torch.cuda.is_available() is False).")
 
     @staticmethod
     def _seed_plaid_index(path: str) -> None:
-        idx = search.FastPlaid(index=path, device="cpu", centroid_index=None)
-        docs = [torch.randn(45, 24, device="cpu") for _ in range(8)]
+        idx = search.FastPlaid(index=path, device="cuda", centroid_index=None)
+        docs = [torch.randn(45, 24, device="cuda") for _ in range(8)]
         idx.create(documents_embeddings=docs, kmeans_niters=2)
         idx.close()
 
-    def test_construct_index_from_tensors_with_hnsw(self, test_index_path):
-        """Rust ``construct_index`` builds codec + Faiss HNSW over on-disk centroids."""
+    def test_construct_index_from_tensors_with_cagra(self, test_index_path):
+        """Rust ``construct_index`` builds codec + CAGRA index over on-disk centroids."""
+        self._require_cuda()
         self._seed_plaid_index(test_index_path)
 
         from fast_plaid.search.load import (
@@ -1651,51 +1636,28 @@ class TestCentroidIndexHnswLive:
         try:
             loaded = _construct_index_from_tensors(
                 data=cpu_tensors,
-                device="cpu",
-                low_memory=False,
-                centroid_index="hnsw",
-                centroid_index_params=dict(self._HNSW_PARAMS),
-            )
-        except Exception as e:
-            _handle_hnsw_construct_failure(e)
-        else:
-            assert loaded is not None
-            assert getattr(loaded, "inner", None) is not None
-
-    def test_construct_index_cagra_alias_matches_hnsw_path(self, test_index_path):
-        """Legacy ``centroid_index='cagra'`` uses the same HNSW code path."""
-        self._seed_plaid_index(test_index_path)
-
-        from fast_plaid.search.load import (
-            _construct_index_from_tensors,
-            _load_index_tensors_cpu,
-        )
-
-        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
-        try:
-            loaded = _construct_index_from_tensors(
-                data=cpu_tensors,
-                device="cpu",
+                device="cuda",
                 low_memory=False,
                 centroid_index="cagra",
-                centroid_index_params=dict(self._HNSW_PARAMS),
+                centroid_index_params=dict(self._CAGRA_PARAMS),
             )
         except Exception as e:
-            _handle_hnsw_construct_failure(e)
+            _handle_cagra_construct_failure(e)
         else:
             assert loaded is not None
 
-    def test_fast_plaid_hnsw_create_and_search(self, test_index_path):
-        """End-to-end: create index and search with HNSW centroid backend."""
+    def test_fast_plaid_cagra_create_and_search(self, test_index_path):
+        """End-to-end: create index and search with CAGRA centroid backend."""
+        self._require_cuda()
         try:
             idx = search.FastPlaid(
                 index=test_index_path,
-                device="cpu",
-                centroid_index="hnsw",
-                centroid_index_params=dict(self._HNSW_PARAMS),
+                device="cuda",
+                centroid_index="cagra",
+                centroid_index_params=dict(self._CAGRA_PARAMS),
             )
-            docs = [torch.randn(40, 24, device="cpu") for _ in range(6)]
-            queries = torch.randn(2, 6, 24, device="cpu")
+            docs = [torch.randn(40, 24, device="cuda") for _ in range(6)]
+            queries = torch.randn(2, 6, 24, device="cuda")
             idx.create(documents_embeddings=docs, kmeans_niters=2)
             results = idx.search(
                 queries_embeddings=queries,
@@ -1705,35 +1667,36 @@ class TestCentroidIndexHnswLive:
             )
             idx.close()
         except Exception as e:
-            _handle_hnsw_construct_failure(e)
+            _handle_cagra_construct_failure(e)
         else:
             assert len(results) == 2
             assert all(len(r) == 4 for r in results)
             for row in results:
-                for passage_id, score, _tok in row:
+                for passage_id, score in row:
                     assert math.isfinite(float(score))
                     assert passage_id >= 0
 
-    def test_hnsw_ivf_probe_overlap_with_dense_baseline(self, tmp_path):
-        """HNSW centroid selection should stay close to exact dense top-IVF on small data.
+    def test_cagra_ivf_probe_overlap_with_dense_baseline(self, tmp_path):
+        """CAGRA centroid selection should stay close to exact dense top-IVF on small data.
 
         Not bit-identical; require majority overlap of retrieved passage ids at top_k.
         """
         torch.manual_seed(42)
+        self._require_cuda()
         path_dense = str(tmp_path / "dense_ix")
-        path_hnsw = str(tmp_path / "hnsw_ix")
+        path_cagra = str(tmp_path / "cagra_ix")
         os.makedirs(path_dense, exist_ok=True)
-        os.makedirs(path_hnsw, exist_ok=True)
+        os.makedirs(path_cagra, exist_ok=True)
 
-        docs = [torch.randn(35, 16, device="cpu") for _ in range(5)]
-        queries = torch.randn(1, 5, 16, device="cpu")
+        docs = [torch.randn(35, 16, device="cuda") for _ in range(5)]
+        queries = torch.randn(1, 5, 16, device="cuda")
 
         def _run(backend: str | None, path: str) -> list[list[tuple[int, float, object]]]:
             kwargs = {}
             if backend is not None:
                 kwargs["centroid_index"] = backend
-                kwargs["centroid_index_params"] = dict(self._HNSW_PARAMS)
-            idx = search.FastPlaid(index=path, device="cpu", **kwargs)
+                kwargs["centroid_index_params"] = dict(self._CAGRA_PARAMS)
+            idx = search.FastPlaid(index=path, device="cuda", **kwargs)
             idx.create(documents_embeddings=docs, kmeans_niters=2)
             out = idx.search(
                 queries_embeddings=queries,
@@ -1746,15 +1709,15 @@ class TestCentroidIndexHnswLive:
 
         try:
             dense_res = _run(None, path_dense)
-            hnsw_res = _run("hnsw", path_hnsw)
+            cagra_res = _run("cagra", path_cagra)
         except Exception as e:
-            _handle_hnsw_construct_failure(e)
+            _handle_cagra_construct_failure(e)
             return
 
         d_ids = [t[0] for t in dense_res[0]]
-        h_ids = [t[0] for t in hnsw_res[0]]
-        overlap = len(set(d_ids) & set(h_ids))
+        c_ids = [t[0] for t in cagra_res[0]]
+        overlap = len(set(d_ids) & set(c_ids))
         assert overlap >= 4, (
-            f"expected Passage overlap between dense and HNSW IVF routing; "
-            f"got {overlap}/5 (dense={d_ids}, hnsw={h_ids})"
+            f"expected Passage overlap between dense and CAGRA IVF routing; "
+            f"got {overlap}/5 (dense={d_ids}, cagra={c_ids})"
         )

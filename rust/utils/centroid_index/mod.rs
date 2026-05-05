@@ -1,24 +1,24 @@
-//! Configurable IVF centroid probe index (dense matmul vs Faiss HNSW graph).
+//! Configurable IVF centroid probe index (dense matmul vs CAGRA graph).
 
-#[cfg(feature = "hnsw")]
+#[cfg(feature = "cagra")]
 mod hnsw_backend;
 
 use anyhow::{Result, anyhow};
-#[cfg(feature = "hnsw")]
+#[cfg(feature = "cagra")]
 use anyhow::Context;
 use tch::{Device, Tensor};
 
-#[cfg(feature = "hnsw")]
+#[cfg(feature = "cagra")]
 use std::sync::Arc;
 
-/// Build-time / search-time parameters for a Faiss HNSW index over centroid rows.
+/// Build-time / search-time parameters for a CAGRA index over centroid rows.
 #[derive(Debug, Clone, Copy)]
 pub struct HnswBuildParams {
-    /// HNSW `M` — max neighbors per vertex (Faiss factory string `HNSW{m}`).
+    /// Graph `M` — max neighbors per vertex (CAGRA `graph_degree`).
     pub m: u32,
-    /// `efConstruction` during graph build.
+    /// `intermediate_graph_degree` during graph build.
     pub ef_construction: u32,
-    /// `efSearch` during querying.
+    /// `itopk_size` / search beam width during querying.
     pub ef_search: u32,
 }
 
@@ -49,11 +49,8 @@ impl Default for CentroidIndexConfig {
     }
 }
 
-/// Names of the parameter keys recognized for graph backends (`hnsw`, etc.).
+/// Names of the parameter keys recognized for graph backends (`cagra`).
 pub const HNSW_PARAM_KEYS: &[&str] = &[
-    "m",
-    "ef_construction",
-    "ef_search",
     "graph_degree",
     "intermediate_graph_degree",
     "itopk_size",
@@ -98,8 +95,7 @@ impl ParamValue {
 impl CentroidIndexConfig {
     /// Resolve a kind string and an optional parameter map into a config.
     ///
-    /// * `kind`: case-insensitive `"dense"` (or `"brute"`), `"hnsw"` /
-    ///   `"faiss_hnsw"`, or legacy `"cagra"` (same as HNSW). `None` selects
+    /// * `kind`: case-insensitive `"dense"` (or `"brute"`) or `"cagra"`. `None` selects
     ///   the default.
     /// * `params`: only meaningful for graph backends. Unknown keys are
     ///   rejected. For dense, any params raise an error.
@@ -114,35 +110,25 @@ impl CentroidIndexConfig {
                     let collected: Vec<_> = params.unwrap().into_iter().collect();
                     if !collected.is_empty() {
                         return Err(anyhow!(
-                            "centroid_index_params is only valid for centroid_index='hnsw' \
-                             (or legacy 'cagra'); got {} entries with centroid_index='dense'",
+                            "centroid_index_params is only valid for centroid_index='cagra'; \
+                             got {} entries with centroid_index='dense'",
                             collected.len()
                         ));
                     }
                 }
                 Ok(Self::Dense)
             }
-            "hnsw" | "faiss_hnsw" | "cagra" => {
+            "cagra" => {
                 let mut hp = HnswBuildParams::default();
                 if let Some(iter) = params {
                     for (raw_key, value) in iter {
                         let key = raw_key.to_ascii_lowercase();
                         match key.as_str() {
-                            "m" | "graph_degree" => hp.m = value.as_u32(&key)?,
-                            "ef_construction" | "intermediate_graph_degree" => {
+                            "graph_degree" => hp.m = value.as_u32(&key)?,
+                            "intermediate_graph_degree" => {
                                 hp.ef_construction = value.as_u32(&key)?
                             }
-                            "ef_search" | "itopk_size" => hp.ef_search = value.as_u32(&key)?,
-                            "build_algo" | "search_width" => {
-                                return Err(anyhow!(
-                                    "centroid_index param '{}' was specific to the removed NVIDIA CAGRA \
-                                     backend; HNSW uses 'm' / 'graph_degree', 'ef_construction' / \
-                                     'intermediate_graph_degree', and 'ef_search' / 'itopk_size' \
-                                     (see {:?})",
-                                    key,
-                                    HNSW_PARAM_KEYS
-                                ));
-                            }
+                            "itopk_size" => hp.ef_search = value.as_u32(&key)?,
                             other => {
                                 return Err(anyhow!(
                                     "unknown centroid_index param '{}'; expected one of {:?}",
@@ -154,24 +140,27 @@ impl CentroidIndexConfig {
                     }
                 }
                 if hp.m < 2 {
-                    return Err(anyhow!("HNSW parameter m (graph_degree) must be >= 2, got {}", hp.m));
+                    return Err(anyhow!(
+                        "CAGRA parameter graph_degree must be >= 2, got {}",
+                        hp.m
+                    ));
                 }
                 if hp.ef_construction < 1 {
                     return Err(anyhow!(
-                        "ef_construction (intermediate_graph_degree) must be >= 1, got {}",
+                        "intermediate_graph_degree must be >= 1, got {}",
                         hp.ef_construction
                     ));
                 }
                 if hp.ef_search < 1 {
                     return Err(anyhow!(
-                        "ef_search (itopk_size) must be >= 1, got {}",
+                        "itopk_size must be >= 1, got {}",
                         hp.ef_search
                     ));
                 }
                 Ok(Self::Hnsw { params: hp })
             }
             other => Err(anyhow!(
-                "unknown centroid_index kind '{}': expected 'dense' or 'hnsw'",
+                "unknown centroid_index kind '{}': expected 'dense' or 'cagra'",
                 other
             )),
         }
@@ -188,21 +177,18 @@ pub(crate) fn dense_like_topk(centroids: &Tensor, queries: &Tensor, k: i64) -> (
     )
 }
 
-#[cfg(not(feature = "hnsw"))]
+#[cfg(not(feature = "cagra"))]
 fn centroid_index_try_build_hnsw(_params: HnswBuildParams, _centroids: Tensor) -> Result<CentroidIndex> {
     Err(anyhow!(
-        "centroid_index='hnsw' requires rebuilding fast_plaid_rust with the Cargo feature `hnsw` \
-         (links libfaiss + faiss_c). Pass e.g. `maturin develop --features hnsw`."
+        "centroid_index='cagra' requires rebuilding fast_plaid_rust with the Cargo feature `cagra` \
+         (links cuVS). Pass e.g. `maturin develop --features cagra`."
     ))
 }
 
-#[cfg(feature = "hnsw")]
+#[cfg(feature = "cagra")]
 fn centroid_index_try_build_hnsw(params: HnswBuildParams, centroids: Tensor) -> Result<CentroidIndex> {
     let hnsw = hnsw_backend::HnswCentroidState::build_centroids(&centroids, &params).with_context(
-        || {
-            "failed to build Faiss HNSW centroid index — install Faiss with the C API \
-             (libfaiss + libfaiss_c) or set FAISS_DIR / FAISS_INCLUDE_DIR / FAISS_LIB_DIR"
-        },
+        || "failed to build CAGRA centroid index — ensure cuVS is installed and CUDA is available",
     )?;
 
     Ok(CentroidIndex::Hnsw {
@@ -228,7 +214,7 @@ pub enum CentroidIndex {
     /// Brute-force backend: holds the centroid matrix and computes
     /// `centroids @ q.T` on demand.
     Dense { centroids: Tensor },
-    #[cfg(feature = "hnsw")]
+    #[cfg(feature = "cagra")]
     /// Graph ANN probe selection (`topk`); same `score()` / `masked_topk` as dense.
     Hnsw {
         centroids: Tensor,
@@ -257,7 +243,7 @@ impl CentroidIndex {
     pub fn topk(&self, queries: &Tensor, k: i64) -> Result<(Tensor, Tensor)> {
         match self {
             CentroidIndex::Dense { centroids } => Ok(dense_like_topk(centroids, queries, k)),
-            #[cfg(feature = "hnsw")]
+            #[cfg(feature = "cagra")]
             CentroidIndex::Hnsw {
                 centroids,
                 hnsw,
@@ -285,7 +271,7 @@ impl CentroidIndex {
             CentroidIndex::Dense { centroids } => centroids
                 .index_select(0, centroid_ids)
                 .matmul(&queries.transpose(0, 1)),
-            #[cfg(feature = "hnsw")]
+            #[cfg(feature = "cagra")]
             CentroidIndex::Hnsw { centroids, .. } => centroids
                 .index_select(0, centroid_ids)
                 .matmul(&queries.transpose(0, 1)),
@@ -299,7 +285,7 @@ impl Clone for CentroidIndex {
             CentroidIndex::Dense { centroids } => CentroidIndex::Dense {
                 centroids: centroids.shallow_clone(),
             },
-            #[cfg(feature = "hnsw")]
+            #[cfg(feature = "cagra")]
             CentroidIndex::Hnsw { centroids, hnsw } => CentroidIndex::Hnsw {
                 centroids: centroids.shallow_clone(),
                 hnsw: Arc::clone(hnsw),
