@@ -29,17 +29,61 @@ def _handle_cagra_construct_failure(exc: BaseException) -> None:
         "failed to build cagra",
     )
     if any(h in msg_l for h in skip_hints):
-        pytest.skip(f"CAGRA centroid backend not usable in this environment: {exc}")
+        pytest.skip(f"CAGRA backend not usable in this environment: {exc}")
 
     # ``FastPlaid.search`` reloads the Rust index; if ``construct_index`` fails for
     # ``centroid_index='hnsw'``, loaders print a warning and the device slot stays
     # empty, yielding this generic error instead of the root cause.
     if isinstance(exc, RuntimeError) and "index could not be loaded on device" in msg_l:
         pytest.skip(
-            f"Faiss HNSW centroid backend not usable (index reload failed): {exc}"
+            f"CAGRA backend not usable (index reload failed): {exc}"
         )
 
     raise exc
+
+
+@pytest.mark.cagra
+class TestAnchorMethodMaxIVFCagraLive:
+    """Smoke tests for anchor_method='maxIVF_cagra' (opt-in runtime).
+
+    These tests verify the path runs without throwing (no quality assertions).
+    """
+
+    @pytest.mark.parametrize("normalize_anchors", [True, False])
+    def test_maxivf_cagra_create_and_search_smoke(self, test_index_path, normalize_anchors):
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        idx = search.FastPlaid(
+            index=test_index_path,
+            device=device,
+            anchor_method="maxIVF_cagra",
+            anchor_params={
+                "n_iter": 1,
+                "graph_degree": 16,
+                "intermediate_graph_degree": 32,
+                "itopk_size": 64,
+                "token_batch_size": 2048,
+                "normalize_anchors": normalize_anchors,
+            },
+        )
+
+        docs = [torch.randn(30, 24, device="cpu") for _ in range(6)]
+        queries = torch.randn(2, 6, 24, device="cpu")
+
+        try:
+            idx.create(documents_embeddings=docs, kmeans_niters=2)
+            out = idx.search(
+                queries_embeddings=queries,
+                top_k=4,
+                n_ivf_probe=4,
+                show_progress=False,
+            )
+        except Exception as e:
+            _handle_cagra_construct_failure(e)
+        else:
+            assert len(out) == 2
+            assert all(len(r) == 4 for r in out)
+        finally:
+            idx.close()
 
 
 @pytest.fixture

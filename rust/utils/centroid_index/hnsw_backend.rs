@@ -6,6 +6,7 @@
 #![cfg(feature = "cagra")]
 
 use std::sync::Arc;
+use std::ops::Mul;
 
 use anyhow::{anyhow, Context, Result};
 use cuvs::cagra::{Index, IndexParams, SearchParams};
@@ -108,7 +109,7 @@ impl HnswCentroidState {
             .to_device(&self.resources)
             .context("cuvs ManagedTensor::to_device (neighbors) failed")?;
 
-        let mut distances_host = Array2::<f32>::zeros((n_q_us, k_usize));
+        let distances_host = Array2::<f32>::zeros((n_q_us, k_usize));
         let distances_dev = ManagedTensor::from(&distances_host)
             .to_device(&self.resources)
             .context("cuvs ManagedTensor::to_device (distances) failed")?;

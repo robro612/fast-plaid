@@ -23,6 +23,7 @@ use winapi::um::libloaderapi::LoadLibraryA;
 use crate::index::create::create_index;
 use crate::index::delete::delete_from_index;
 use crate::index::update::update_index;
+use crate::index::maxivf_cagra::maxivf_cagra_anchors;
 use search::load::{construct_index, get_device, PyLoadedIndex};
 use search::search::{
     search_many, search_many_with_token_scores, QueryResult, QueryResultWithTokenScores,
@@ -379,5 +380,6 @@ fn python_module(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(update, m)?)?;
     m.add_function(wrap_pyfunction!(delete, m)?)?;
     m.add_function(wrap_pyfunction!(reconstruct_embeddings, m)?)?;
+    m.add_function(wrap_pyfunction!(maxivf_cagra_anchors, m)?)?;
     Ok(())
 }

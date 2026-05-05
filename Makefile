@@ -44,7 +44,7 @@ install: build-base
 
 test:
 	$(MAKE) build-base
-	$(UV) run --no-sync pytest tests/test.py -q
+	$(UV) run --no-sync pytest tests/test.py -vv
 
 test-all:
 	$(MAKE) test
@@ -86,7 +86,7 @@ test-cagra: build-cagra
 	env \
 	  -u CONDA_PREFIX -u CONDA_DEFAULT_ENV -u CONDA_SHLVL -u CONDA_EXE -u CONDA_PYTHON_EXE -u CONDA_PROMPT_MODIFIER \
 	  LD_LIBRARY_PATH="$(LD_CAGRA):$${LD_LIBRARY_PATH:-}" \
-	  $(UV) run --no-sync pytest tests/test.py -m cagra -q
+	  $(UV) run --no-sync pytest tests/test.py -m cagra -vv
 
 lint: env-dev
 	$(UV) run --no-sync pre-commit run --files python/**/**/**.py

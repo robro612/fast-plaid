@@ -332,6 +332,8 @@ class FastPlaid:
         low_memory: bool = True,
         centroid_index: str | None = None,
         centroid_index_params: dict[str, Any] | None = None,
+        anchor_method: str | None = None,
+        anchor_params: dict[str, Any] | None = None,
         **kwargs: Any,  # noqa: ARG002
     ) -> None:
         """Initialize the FastPlaid instance.
@@ -357,6 +359,19 @@ class FastPlaid:
             number of intermediate candidates). Passing params with
             ``centroid_index="dense"`` (or ``"brute"``) is an error. Unknown
             keys raise.
+        anchor_method:
+            Method used to construct anchors (centroids) during ``create()``.
+            ``None`` / ``"kmeans"`` uses the existing K-means training.
+            ``"maxIVF_cagra"`` uses an iterative CAGRA assignment + recompute loop.
+        anchor_params:
+            Parameters for ``anchor_method="maxIVF_cagra"``. Recognized keys:
+            ``n_anchors`` (int, optional; defaults to ``floor(0.025 * n_tokens_total)``),
+            ``n_iter`` (int, default 5),
+            ``graph_degree`` (int, default 32),
+            ``intermediate_graph_degree`` (int, default 64),
+            ``itopk_size`` (int, default 128),
+            ``token_batch_size`` (int, default 65536),
+            ``normalize_anchors`` (bool, default True).
         kwargs:
             Additional keyword arguments.
 
@@ -381,6 +396,8 @@ class FastPlaid:
         self.low_memory = low_memory
         self.centroid_index = centroid_index
         self.centroid_index_params = centroid_index_params
+        self.anchor_method = anchor_method
+        self.anchor_params = anchor_params or {}
 
         # Concurrency Control
         if not os.path.exists(self.index):
@@ -610,16 +627,36 @@ class FastPlaid:
             # Use the first device for creation logic
             primary_device = self.devices[0]
 
-            centroids = compute_kmeans(
-                documents_embeddings=documents_embeddings,
-                dim=dim,
-                kmeans_niters=kmeans_niters,
-                device=primary_device,
-                max_points_per_centroid=max_points_per_centroid,
-                n_samples_kmeans=n_samples_kmeans,
-                seed=seed,
-                use_triton_kmeans=use_triton_kmeans,
-            )
+            method = (self.anchor_method or "kmeans").lower()
+            if method in ("kmeans",):
+                centroids = compute_kmeans(
+                    documents_embeddings=documents_embeddings,
+                    dim=dim,
+                    kmeans_niters=kmeans_niters,
+                    device=primary_device,
+                    max_points_per_centroid=max_points_per_centroid,
+                    n_samples_kmeans=n_samples_kmeans,
+                    seed=seed,
+                    use_triton_kmeans=use_triton_kmeans,
+                )
+            elif method == "maxivf_cagra":
+                p = dict(self.anchor_params or {})
+                centroids = fast_plaid_rust.maxivf_cagra_anchors(
+                    embeddings=documents_embeddings,
+                    device=primary_device,
+                    n_anchors=p.get("n_anchors"),
+                    n_iter=int(p.get("n_iter", 5)),
+                    graph_degree=int(p.get("graph_degree", 32)),
+                    intermediate_graph_degree=int(p.get("intermediate_graph_degree", 64)),
+                    itopk_size=int(p.get("itopk_size", 128)),
+                    token_batch_size=int(p.get("token_batch_size", 65536)),
+                    seed=int(p.get("seed", seed)) if p.get("seed", None) is not None else int(seed),
+                    normalize_anchors=bool(p.get("normalize_anchors", True)),
+                ).to(device=primary_device, dtype=torch.float16)
+            else:
+                raise ValueError(
+                    f"Unknown anchor_method '{self.anchor_method}'; expected 'kmeans' or 'maxIVF_cagra'"
+                )
 
             fast_plaid_rust.create(
                 index=self.index,
