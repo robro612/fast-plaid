@@ -6,11 +6,11 @@ lint:
 install:
 	cargo clean
 	uv pip install torch==2.9.0
-	uv pip install -e ".[dev]"
+	uv pip install -e ".[dev]" --no-build-isolation
 
 test:
 	cargo clean
-	uv run pytest tests/test.py
+	uv run --no-sync pytest tests/test.py
 
 evaluate:
 	uv run python docs/benchmark/benchmark.py

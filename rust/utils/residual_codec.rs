@@ -1,5 +1,7 @@
 use tch::{Device, Kind, Tensor};
 
+use crate::utils::centroid_index::{CentroidIndex, CentroidIndexConfig};
+
 /// A codec that manages the quantization parameters and lookup tables for the index.
 ///
 /// This struct acts as a container for all the read-only tensors required to
@@ -17,6 +19,9 @@ pub struct ResidualCodec {
     pub nbits: i64,
     /// The coarse centroids (codebook) of shape `[num_centroids, dim]`.
     pub centroids: Tensor,
+    /// Search-time index over `centroids`. Provides batched top-k and
+    /// arbitrary-ID scoring; see [`CentroidIndex`].
+    pub centroids_index: CentroidIndex,
     /// The average residual vector, added to reconstructed vectors to reduce error.
     pub avg_residual: Tensor,
     /// The boundaries defining which bucket a residual value falls into.
@@ -40,6 +45,7 @@ impl Clone for ResidualCodec {
             // tch::Tensor::shallow_clone() creates a new Tensor object sharing the
             // same underlying storage, which is efficient for this read-only struct.
             centroids: self.centroids.shallow_clone(),
+            centroids_index: self.centroids_index.clone(),
             avg_residual: self.avg_residual.shallow_clone(),
             bucket_cutoffs: self.bucket_cutoffs.as_ref().map(|t| t.shallow_clone()),
             bucket_weights: self.bucket_weights.as_ref().map(|t| t.shallow_clone()),
@@ -76,6 +82,7 @@ impl ResidualCodec {
         bucket_cutoffs_tensor_initial: Option<Tensor>,
         bucket_weights_tensor_initial: Option<Tensor>,
         device: Device,
+        centroid_index_config: CentroidIndexConfig,
     ) -> anyhow::Result<Self> {
         let bit_helper_tensor = Tensor::arange_start(0, nbits_param, (Kind::Int8, device));
 
@@ -139,9 +146,16 @@ impl ResidualCodec {
                 None
             };
 
+        let centroids_index = CentroidIndex::build(
+            centroid_index_config,
+            centroids_tensor_initial.shallow_clone(),
+            device,
+        )?;
+
         Ok(Self {
             nbits: nbits_param,
             centroids: centroids_tensor_initial,
+            centroids_index,
             avg_residual: avg_residual_tensor_initial,
             bucket_cutoffs: bucket_cutoffs_tensor_initial,
             bucket_weights: bucket_weights_tensor_initial,

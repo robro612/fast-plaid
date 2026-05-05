@@ -487,10 +487,7 @@ pub fn search(
     let (passage_ids, scores, token_matrices) = tch::no_grad(|| {
         let query_embeddings_unsqueezed = query_embeddings.unsqueeze(0);
 
-        // Compute query-centroid scores
-        let query_centroid_scores = codec.centroids.matmul(&query_embeddings.transpose(0, 1));
-
-        // Select IVF cells to probe
+        // Select IVF cells to probe via the centroid index.
         let flat_cells_to_probe = if let Some(subset_tensor) = subset {
             // Subset optimization: restrict to centroids containing subset documents
             let (subset_doc_codes, _) = doc_codes_strided.lookup(subset_tensor, device);
@@ -502,30 +499,22 @@ pub fn search(
                     .flatten(0, -1)
                     .unique_dim(0, true, false, false);
 
-                let subset_scores = query_centroid_scores.index_select(0, &unique_subset_centroids);
                 let available_centroids = unique_subset_centroids.size()[0];
                 let actual_k = n_ivf_probe.min(available_centroids);
 
-                let top_indices_local = if actual_k == 1 {
-                    subset_scores.argmax(0, true)
-                } else {
-                    subset_scores.topk(actual_k, 0, true, false).1
-                };
-
-                let flat_local_indices = top_indices_local.flatten(0, -1);
-                unique_subset_centroids.index_select(0, &flat_local_indices)
+                let (cell_ids, _) = codec.centroids_index.masked_topk(
+                    query_embeddings,
+                    &unique_subset_centroids,
+                    actual_k,
+                );
+                cell_ids.flatten(0, -1).contiguous()
             }
         } else {
-            // Standard path
-            let selected_ivf_cells_indices = if n_ivf_probe == 1 {
-                query_centroid_scores.argmax(0, true).permute(&[1, 0])
-            } else {
-                query_centroid_scores
-                    .topk(n_ivf_probe, 0, true, false)
-                    .1
-                    .permute(&[1, 0])
-            };
-            selected_ivf_cells_indices.flatten(0, -1).contiguous()
+            // Standard path: top-k centroids per query token.
+            let (cell_ids, _) = codec
+                .centroids_index
+                .topk(query_embeddings, n_ivf_probe)?;
+            cell_ids.flatten(0, -1).contiguous()
         };
 
         let (unique_ivf_cells_to_probe, _, _) =
@@ -575,7 +564,9 @@ pub fn search(
                 continue;
             }
 
-            let batch_approx_scores = query_centroid_scores.index_select(0, &batch_packed_codes);
+            let batch_approx_scores = codec
+                .centroids_index
+                .score(query_embeddings, &batch_packed_codes);
 
             let (padded_approx_scores, mask) =
                 direct_pad_sequences(&batch_approx_scores, &batch_doc_lengths, 0.0, device)?;

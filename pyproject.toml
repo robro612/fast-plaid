@@ -78,6 +78,7 @@ norecursedirs = ["build", "docs", "node_modules"]
 markers = [
   "web: tests that require using the Internet",
   "slow: tests that take a long time to run",
+  "faiss_hnsw: centroid HNSW integration (needs libfaiss + fast_plaid_rust built with --features hnsw)",
 ]
 
 [tool.ruff]

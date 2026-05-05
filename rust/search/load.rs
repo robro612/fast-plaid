@@ -4,9 +4,11 @@ use tch::{Device, Kind, Tensor};
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pyo3_tch::PyTensor;
 
 use crate::search::tensor::StridedTensor;
+use crate::utils::centroid_index::{CentroidIndexConfig, ParamValue};
 use crate::utils::errors::anyhow_to_pyerr;
 use crate::utils::residual_codec::ResidualCodec;
 
@@ -40,6 +42,36 @@ pub fn get_device(device: &str) -> Result<Device, PyErr> {
 pub struct Metadata {
     pub num_chunks: usize,
     pub nbits: i64,
+}
+
+/// Extracts a Python dict of centroid-index parameters into a Vec of
+/// (key, value) pairs in our typed `ParamValue` enum. Each value must
+/// be an int or a str; anything else raises a TypeError.
+fn extract_param_dict(dict: &Bound<'_, PyDict>) -> PyResult<Vec<(String, ParamValue)>> {
+    let mut out = Vec::with_capacity(dict.len());
+    for (key, value) in dict.iter() {
+        let key_str: String = key.extract().map_err(|_| {
+            PyValueError::new_err("centroid_index_params keys must be strings")
+        })?;
+        // Try int first (covers Python bools too — exclude them explicitly).
+        let value = if value.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyValueError::new_err(format!(
+                "centroid_index_params['{}']: bool is not a valid parameter type",
+                key_str
+            )));
+        } else if let Ok(v) = value.extract::<i64>() {
+            ParamValue::Int(v)
+        } else if let Ok(s) = value.extract::<String>() {
+            ParamValue::Str(s)
+        } else {
+            return Err(PyValueError::new_err(format!(
+                "centroid_index_params['{}'] must be int or str",
+                key_str
+            )));
+        };
+        out.push((key_str, value));
+    }
+    Ok(out)
 }
 
 /// The core struct holding all immutable data required for search operations.
@@ -119,10 +151,18 @@ fn ensure_tensor(t: PyTensor, device: Device, kind: Kind) -> Tensor {
 /// * `doc_lengths` - The true lengths of documents (int64).
 /// * `device` - The target device string (e.g. "cuda:0").
 /// * `low_memory` - If true, keeps document data on CPU.
+/// * `centroid_index` - IVF centroid probing backend: `"dense"`/`"brute"` (exact matmul),
+///   or `"hnsw"` / `"faiss_hnsw"` (Faiss HNSW over centroid rows when fast_plaid_rust is built
+///   with Cargo feature `hnsw` and libfaiss is available). Legacy alias `"cagra"` selects the
+///   same HNSW backend. Case-insensitive. `None` selects the default dense backend.
+/// * `centroid_index_params` - Optional dict of backend-specific
+///   parameters. For HNSW: `m` or `graph_degree`, `ef_construction` or
+///   `intermediate_graph_degree`, `ef_search` or `itopk_size`.
+///   Parameters `build_algo` and `search_width` are rejected (CAGRA-only). Unknown keys raise.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 pub fn construct_index(
-    _py: Python<'_>,
+    py: Python<'_>,
     nbits: i64,
     centroids: PyTensor,
     avg_residual: PyTensor,
@@ -135,11 +175,28 @@ pub fn construct_index(
     doc_lengths: PyTensor,
     device: String,
     low_memory: bool,
+    centroid_index: Option<String>,
+    centroid_index_params: Option<Bound<'_, PyDict>>,
 ) -> PyResult<PyLoadedIndex> {
     let main_device = get_device(&device)?;
 
     // Force document tensors to CPU in low memory mode
     let storage_device = if low_memory { Device::Cpu } else { main_device };
+
+    let extracted_params = match centroid_index_params.as_ref() {
+        Some(dict) => Some(extract_param_dict(dict)?),
+        None => None,
+    };
+    let centroid_index_config = CentroidIndexConfig::parse(
+        centroid_index.as_deref(),
+        extracted_params
+            .as_ref()
+            .map(|v| v.iter().map(|(k, val)| (k.as_str(), val.clone()))),
+    )
+    .map_err(anyhow_to_pyerr)?;
+
+    // Avoid an unused-binding warning when no params were provided.
+    let _ = py;
 
     // Load codec (small tensors)
     let codec = ResidualCodec::load(
@@ -149,6 +206,7 @@ pub fn construct_index(
         Some(ensure_tensor(bucket_cutoffs, main_device, Kind::Half)),
         Some(ensure_tensor(bucket_weights, main_device, Kind::Half)),
         main_device,
+        centroid_index_config,
     )
     .map_err(anyhow_to_pyerr)?;
 

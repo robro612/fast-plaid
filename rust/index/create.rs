@@ -16,6 +16,7 @@ use std::path::Path;
 use tch::{Device, Kind, Tensor};
 
 use crate::search::tensor::scalar_quantile_kthvalue;
+use crate::utils::centroid_index::CentroidIndexConfig;
 use crate::utils::residual_codec::ResidualCodec;
 
 /// Holds metadata for a chunk of the index, including the number of
@@ -312,6 +313,9 @@ pub fn create_index(
         None,
         None,
         device,
+        // Indexing only uses the codec for `compress_into_codes` against the
+        // raw centroid tensor; no search-time index is needed.
+        CentroidIndexConfig::Dense,
     )?;
 
     let heldout_codes = compress_into_codes(&heldout_samples, &initial_codec.centroids);
@@ -374,6 +378,7 @@ pub fn create_index(
         Some(bucket_cutoffs.copy()),
         Some(bucket_weights.copy()),
         device,
+        CentroidIndexConfig::Dense,
     )?;
 
     // Save Codec

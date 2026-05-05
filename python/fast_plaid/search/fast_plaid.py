@@ -330,6 +330,8 @@ class FastPlaid:
         index: str,
         device: str | list[str] | None = None,
         low_memory: bool = True,
+        centroid_index: str | None = None,
+        centroid_index_params: dict[str, Any] | None = None,
         **kwargs: Any,  # noqa: ARG002
     ) -> None:
         """Initialize the FastPlaid instance.
@@ -342,6 +344,22 @@ class FastPlaid:
             The device(s) to use for index operations (e.g., 'cuda:0', 'cpu').
         low_memory:
             Whether to use low memory mode when loading the index.
+        centroid_index:
+            Backend for the centroid lookup at search time. One of
+            ``"dense"`` (default; brute-force ``centroids @ q.T``),
+            ``"hnsw"`` / ``"faiss_hnsw"`` (Faiss HNSW graph over centroid rows
+            when the Rust extension is built with the ``hnsw`` Cargo feature
+            and the Faiss C library is installed), or legacy ``"cagra"`` as an
+            alias for the same HNSW backend. Without the feature or Faiss,
+            configuring these graph backends raises a descriptive error.
+            ``None`` uses the default.
+        centroid_index_params:
+            Backend-specific parameter overrides. Only meaningful for HNSW /
+            ``cagra``. Recognized keys: ``m`` (alias ``graph_degree``, default
+            32), ``ef_construction`` (alias ``intermediate_graph_degree``,
+            default 40), ``ef_search`` (alias ``itopk_size``, default 64).
+            Keys ``build_algo`` and ``search_width`` (CAGRA-only) raise.
+            Unknown keys raise.
         kwargs:
             Additional keyword arguments.
 
@@ -364,6 +382,8 @@ class FastPlaid:
         self.torch_path = _load_torch_path(device=self.devices[0])
         self.index = index
         self.low_memory = low_memory
+        self.centroid_index = centroid_index
+        self.centroid_index_params = centroid_index_params
 
         # Concurrency Control
         if not os.path.exists(self.index):
@@ -504,6 +524,8 @@ class FastPlaid:
             devices=self.devices,
             indices=self.indices,
             low_memory=self.low_memory,
+            centroid_index=self.centroid_index,
+            centroid_index_params=self.centroid_index_params,
         )
 
         # Atomic swap of indices dictionary
@@ -627,6 +649,7 @@ class FastPlaid:
                 devices=self.devices,
                 indices={},
                 low_memory=self.low_memory,
+                centroid_index=self.centroid_index,
             )
 
             # Atomic swap of indices dictionary
@@ -1147,6 +1170,7 @@ class FastPlaid:
                 devices=self.devices,
                 indices={},
                 low_memory=self.low_memory,
+                centroid_index=self.centroid_index,
             )
 
             # Atomic swap of indices dictionary

@@ -1,10 +1,49 @@
 import os
 import shutil
+import math
 from datetime import date
 
 import pytest
 import torch
 from fast_plaid import filtering, search
+
+
+def _handle_hnsw_construct_failure(exc: BaseException) -> None:
+    """Re-raise, pytest.skip, or fail depending on env and error text."""
+    if os.environ.get("FASTPLAID_REQUIRE_HNSW") == "1":
+        raise AssertionError(
+            "FASTPLAID_REQUIRE_HNSW=1 but Faiss HNSW centroid index could not be built."
+        ) from exc
+
+    msg_l = str(exc).lower()
+    if "unknown centroid_index kind" in msg_l:
+        raise AssertionError(
+            "fast_plaid_rust is too old to recognize centroid_index='hnsw'; rebuild the extension."
+        ) from exc
+
+    skip_hints = (
+        "requires rebuilding fast_plaid_rust with the cargo feature",
+        "maturin develop --features hnsw",
+        "libfaiss",
+        "lfaiss",
+        "unable to find library -lfaiss",
+        "failed to build faiss hnsw",
+        "indexbuilder hnsw build failed",
+        "is libfaiss installed",
+        "set_index_parameters",
+    )
+    if any(h in msg_l for h in skip_hints):
+        pytest.skip(f"Faiss HNSW centroid backend not usable in this environment: {exc}")
+
+    # ``FastPlaid.search`` reloads the Rust index; if ``construct_index`` fails for
+    # ``centroid_index='hnsw'``, loaders print a warning and the device slot stays
+    # empty, yielding this generic error instead of the root cause.
+    if isinstance(exc, RuntimeError) and "index could not be loaded on device" in msg_l:
+        pytest.skip(
+            f"Faiss HNSW centroid backend not usable (index reload failed): {exc}"
+        )
+
+    raise exc
 
 
 @pytest.fixture
@@ -1389,3 +1428,333 @@ def test():
 
     index.close()
     shutil.rmtree(index_name, ignore_errors=True)
+
+
+class TestCentroidIndexBackend:
+    """Smoke tests for the configurable centroid-index backend."""
+
+    @staticmethod
+    def _assert_graph_centroid_index_unavailable(exc: BaseException) -> None:
+        """Graph centroid index without the hnsw feature (or Faiss) must fail clearly."""
+        msg = str(exc).lower()
+        assert any(x in msg for x in ("hnsw", "cagra", "cargo feature", "faiss"))
+        assert any(
+            k in msg
+            for k in (
+                "cargo feature",
+                "faiss",
+                "libfaiss",
+            )
+        )
+
+    @staticmethod
+    def _build_and_search(index_path: str, centroid_index):
+        idx = search.FastPlaid(
+            index=index_path,
+            device="cpu",
+            centroid_index=centroid_index,
+        )
+        docs = [torch.randn(60, 32, device="cpu") for _ in range(20)]
+        queries = torch.randn(3, 8, 32, device="cpu")
+        idx.create(documents_embeddings=docs, kmeans_niters=2)
+        results = idx.search(queries_embeddings=queries, top_k=5)
+        idx.close()
+        return results
+
+    def test_default_backend_works(self, test_index_path):
+        """Default (None) selects dense and search returns results."""
+        results = self._build_and_search(test_index_path, centroid_index=None)
+        assert len(results) == 3
+        assert all(len(r) == 5 for r in results)
+
+    def test_explicit_dense_works(self, test_index_path):
+        """Explicit 'dense' selects the brute-force backend and works."""
+        results = self._build_and_search(test_index_path, centroid_index="dense")
+        assert len(results) == 3
+        assert all(len(r) == 5 for r in results)
+
+    def test_brute_alias_works(self, test_index_path):
+        """'brute' is accepted as an alias for 'dense'."""
+        results = self._build_and_search(test_index_path, centroid_index="brute")
+        assert len(results) == 3
+        assert all(len(r) == 5 for r in results)
+
+    def test_unknown_kind_raises(self, test_index_path):
+        """Unknown backend name raises at the pyfunction level."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception, match="unknown centroid_index"):
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="not-a-real-backend",
+            )
+
+    def test_hnsw_without_feature_or_faiss_fails(self, test_index_path):
+        """Selecting graph ANN on CPU fails when the extension lacks hnsw / Faiss."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        for kind in ("hnsw", "cagra"):
+            with pytest.raises(Exception) as ei:
+                _construct_index_from_tensors(
+                    data=cpu_tensors,
+                    device="cpu",
+                    low_memory=False,
+                    centroid_index=kind,
+                )
+            self._assert_graph_centroid_index_unavailable(ei.value)
+
+    def test_hnsw_params_validate_before_backend_fail(self, test_index_path):
+        """Valid HNSW param dict parses; load still fails without feature or Faiss."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception) as ei:
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="hnsw",
+                centroid_index_params={
+                    "m": 32,
+                    "ef_construction": 64,
+                    "ef_search": 128,
+                },
+            )
+        self._assert_graph_centroid_index_unavailable(ei.value)
+
+    def test_hnsw_params_unknown_key_raises(self, test_index_path):
+        """Unknown HNSW param keys raise before the Faiss build step."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception, match="unknown centroid_index param 'graph_dgree'"):
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="hnsw",
+                centroid_index_params={"graph_dgree": 32},
+            )
+
+    def test_hnsw_rejects_legacy_cagra_only_params(self, test_index_path):
+        """CAGRA-only params are rejected with a helpful message."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception, match="removed NVIDIA CAGRA"):
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="hnsw",
+                centroid_index_params={"build_algo": "hnsw"},
+            )
+
+    def test_hnsw_params_m_too_small_raises(self, test_index_path):
+        """HNSW M must be >= 2."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception, match="m .*graph_degree.* must be >="):
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="hnsw",
+                centroid_index_params={"m": 1},
+            )
+
+    def test_dense_with_params_raises(self, test_index_path):
+        """Passing params with the dense backend is an error, not silent."""
+        self._build_and_search(test_index_path, centroid_index=None)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        with pytest.raises(Exception, match="centroid_index_params is only valid"):
+            _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="dense",
+                centroid_index_params={"graph_degree": 32},
+            )
+
+
+@pytest.mark.faiss_hnsw
+class TestCentroidIndexHnswLive:
+    """Faiss HNSW centroid construction + search (opt-in runtime).
+
+    Requires ``fast_plaid_rust`` built with ``--features hnsw`` and a working
+    ``libfaiss`` / ``libfaiss_c`` on ``LD_LIBRARY_PATH`` (or standard install paths).
+
+    Otherwise tests **skip**. Set ``FASTPLAID_REQUIRE_HNSW=1`` to turn missing Faiss
+    into a hard failure (e.g. CI with Faiss present).
+    """
+
+    _HNSW_PARAMS = {"m": 16, "ef_construction": 64, "ef_search": 128}
+
+    @staticmethod
+    def _seed_plaid_index(path: str) -> None:
+        idx = search.FastPlaid(index=path, device="cpu", centroid_index=None)
+        docs = [torch.randn(45, 24, device="cpu") for _ in range(8)]
+        idx.create(documents_embeddings=docs, kmeans_niters=2)
+        idx.close()
+
+    def test_construct_index_from_tensors_with_hnsw(self, test_index_path):
+        """Rust ``construct_index`` builds codec + Faiss HNSW over on-disk centroids."""
+        self._seed_plaid_index(test_index_path)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        try:
+            loaded = _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="hnsw",
+                centroid_index_params=dict(self._HNSW_PARAMS),
+            )
+        except Exception as e:
+            _handle_hnsw_construct_failure(e)
+        else:
+            assert loaded is not None
+            assert getattr(loaded, "inner", None) is not None
+
+    def test_construct_index_cagra_alias_matches_hnsw_path(self, test_index_path):
+        """Legacy ``centroid_index='cagra'`` uses the same HNSW code path."""
+        self._seed_plaid_index(test_index_path)
+
+        from fast_plaid.search.load import (
+            _construct_index_from_tensors,
+            _load_index_tensors_cpu,
+        )
+
+        cpu_tensors = _load_index_tensors_cpu(index_path=test_index_path)
+        try:
+            loaded = _construct_index_from_tensors(
+                data=cpu_tensors,
+                device="cpu",
+                low_memory=False,
+                centroid_index="cagra",
+                centroid_index_params=dict(self._HNSW_PARAMS),
+            )
+        except Exception as e:
+            _handle_hnsw_construct_failure(e)
+        else:
+            assert loaded is not None
+
+    def test_fast_plaid_hnsw_create_and_search(self, test_index_path):
+        """End-to-end: create index and search with HNSW centroid backend."""
+        try:
+            idx = search.FastPlaid(
+                index=test_index_path,
+                device="cpu",
+                centroid_index="hnsw",
+                centroid_index_params=dict(self._HNSW_PARAMS),
+            )
+            docs = [torch.randn(40, 24, device="cpu") for _ in range(6)]
+            queries = torch.randn(2, 6, 24, device="cpu")
+            idx.create(documents_embeddings=docs, kmeans_niters=2)
+            results = idx.search(
+                queries_embeddings=queries,
+                top_k=4,
+                n_ivf_probe=4,
+                show_progress=False,
+            )
+            idx.close()
+        except Exception as e:
+            _handle_hnsw_construct_failure(e)
+        else:
+            assert len(results) == 2
+            assert all(len(r) == 4 for r in results)
+            for row in results:
+                for passage_id, score, _tok in row:
+                    assert math.isfinite(float(score))
+                    assert passage_id >= 0
+
+    def test_hnsw_ivf_probe_overlap_with_dense_baseline(self, tmp_path):
+        """HNSW centroid selection should stay close to exact dense top-IVF on small data.
+
+        Not bit-identical; require majority overlap of retrieved passage ids at top_k.
+        """
+        torch.manual_seed(42)
+        path_dense = str(tmp_path / "dense_ix")
+        path_hnsw = str(tmp_path / "hnsw_ix")
+        os.makedirs(path_dense, exist_ok=True)
+        os.makedirs(path_hnsw, exist_ok=True)
+
+        docs = [torch.randn(35, 16, device="cpu") for _ in range(5)]
+        queries = torch.randn(1, 5, 16, device="cpu")
+
+        def _run(backend: str | None, path: str) -> list[list[tuple[int, float, object]]]:
+            kwargs = {}
+            if backend is not None:
+                kwargs["centroid_index"] = backend
+                kwargs["centroid_index_params"] = dict(self._HNSW_PARAMS)
+            idx = search.FastPlaid(index=path, device="cpu", **kwargs)
+            idx.create(documents_embeddings=docs, kmeans_niters=2)
+            out = idx.search(
+                queries_embeddings=queries,
+                top_k=5,
+                n_ivf_probe=4,
+                show_progress=False,
+            )
+            idx.close()
+            return out
+
+        try:
+            dense_res = _run(None, path_dense)
+            hnsw_res = _run("hnsw", path_hnsw)
+        except Exception as e:
+            _handle_hnsw_construct_failure(e)
+            return
+
+        d_ids = [t[0] for t in dense_res[0]]
+        h_ids = [t[0] for t in hnsw_res[0]]
+        overlap = len(set(d_ids) & set(h_ids))
+        assert overlap >= 4, (
+            f"expected Passage overlap between dense and HNSW IVF routing; "
+            f"got {overlap}/5 (dense={d_ids}, hnsw={h_ids})"
+        )

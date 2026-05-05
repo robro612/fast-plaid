@@ -323,7 +323,11 @@ def _load_index_tensors_cpu(index_path: str) -> dict[str, Any] | None:
 
 
 def _construct_index_from_tensors(
-    data: dict[str, Any], device: str, low_memory: bool
+    data: dict[str, Any],
+    device: str,
+    low_memory: bool,
+    centroid_index: str | None = None,
+    centroid_index_params: dict[str, Any] | None = None,
 ) -> Any:
     """Build Rust index from CPU tensors.
 
@@ -335,6 +339,14 @@ def _construct_index_from_tensors(
         The target device for the index.
     low_memory:
         If True, keeps large document tensors on CPU to save VRAM.
+    centroid_index:
+        Backend for the centroid lookup. One of ``"dense"`` (default),
+        ``"hnsw"`` / ``"faiss_hnsw"``, or legacy ``"cagra"`` (HNSW).
+        ``None`` uses the default.
+    centroid_index_params:
+        Backend-specific parameter overrides for HNSW: ``m`` /
+        ``graph_degree``, ``ef_construction`` / ``intermediate_graph_degree``,
+        ``ef_search`` / ``itopk_size``. Unknown keys raise.
 
     """
     gpu_data: dict[str, Any] = {}
@@ -362,6 +374,8 @@ def _construct_index_from_tensors(
         doc_lengths=gpu_data["doc_lengths"],
         device=device,
         low_memory=low_memory,
+        centroid_index=centroid_index,
+        centroid_index_params=centroid_index_params,
     )
 
 
@@ -370,6 +384,8 @@ def _reload_index(
     devices: list[str],
     indices: dict[str, Any],
     low_memory: bool = False,
+    centroid_index: str | None = None,
+    centroid_index_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Load or reload the index for all configured devices.
 
@@ -383,6 +399,12 @@ def _reload_index(
         Dictionary mapping devices to index objects.
     low_memory:
         If True, keeps large document tensors on CPU.
+    centroid_index:
+        Backend for the centroid lookup. One of ``"dense"`` (default),
+        ``"hnsw"``, ``"faiss_hnsw"``, or ``"cagra"``. ``None`` uses the default.
+    centroid_index_params:
+        Backend-specific parameter overrides; see
+        :func:`_construct_index_from_tensors`.
 
     """
     if not os.path.exists(os.path.join(index_path, "metadata.json")):
@@ -409,6 +431,8 @@ def _reload_index(
                 data=cpu_tensors,  # noqa: F821
                 device=device,
                 low_memory=low_memory,
+                centroid_index=centroid_index,
+                centroid_index_params=centroid_index_params,
             )
             return device, idx  # noqa: TRY300
         except Exception as e:
