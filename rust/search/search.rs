@@ -238,51 +238,84 @@ pub fn search_many(
         );
     };
 
-    let search_closure = |query_index| {
-        let query_embedding = queries.i(query_index).to(device);
+    // Move the full query batch to the target device once. This avoids per-query `.to(device)`
+    // calls which can surface unrelated asynchronous CUDA errors in confusing places.
+    let queries_on_device = queries.to_device(device);
 
-        // Handle the per-query subset list
-        let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
-        let subset_tensor = query_subset.map(|ids| {
-            Tensor::from_slice(ids)
-                .to_device(device)
-                .to_kind(Kind::Int64)
-        });
+    let mut results: Vec<QueryResult> = Vec::with_capacity(num_queries as usize);
 
-        let (passage_ids, scores, _) = search(
-            &query_embedding,
-            ivf_index,
-            &index.codec,
-            query_dim,
-            &index.doc_codes_strided,
-            &index.doc_residuals_strided,
-            params.n_ivf_probe as i64,
-            params.batch_size as i64,
-            params.n_full_scores as i64,
-            index.nbits,
-            params.top_k,
-            device,
-            subset_tensor.as_ref(),
-            false,
-        )
-        .unwrap_or_default();
-
-        QueryResult {
-            query_id: query_index as usize,
-            passage_ids,
-            scores,
-        }
-    };
-
-    let results = if show_progress {
+    if show_progress {
         let bar = ProgressBar::new(num_queries.try_into().unwrap());
-        (0..num_queries)
-            .progress_with(bar)
-            .map(search_closure)
-            .collect()
+        for query_index in (0..num_queries).progress_with(bar) {
+            let query_embedding = queries_on_device.i(query_index);
+
+            let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
+            let subset_tensor = query_subset.map(|ids| {
+                Tensor::from_slice(ids)
+                    .to_device(device)
+                    .to_kind(Kind::Int64)
+            });
+
+            let (passage_ids, scores, _) = search(
+                &query_embedding,
+                ivf_index,
+                &index.codec,
+                query_dim,
+                &index.doc_codes_strided,
+                &index.doc_residuals_strided,
+                params.n_ivf_probe as i64,
+                params.batch_size as i64,
+                params.n_full_scores as i64,
+                index.nbits,
+                params.top_k,
+                device,
+                subset_tensor.as_ref(),
+                false,
+            )
+            .map_err(|e| anyhow!("search failed for query_index={}: {}", query_index, e))?;
+
+            results.push(QueryResult {
+                query_id: query_index as usize,
+                passage_ids,
+                scores,
+            });
+        }
     } else {
-        (0..num_queries).map(search_closure).collect()
-    };
+        for query_index in 0..num_queries {
+            let query_embedding = queries_on_device.i(query_index);
+
+            let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
+            let subset_tensor = query_subset.map(|ids| {
+                Tensor::from_slice(ids)
+                    .to_device(device)
+                    .to_kind(Kind::Int64)
+            });
+
+            let (passage_ids, scores, _) = search(
+                &query_embedding,
+                ivf_index,
+                &index.codec,
+                query_dim,
+                &index.doc_codes_strided,
+                &index.doc_residuals_strided,
+                params.n_ivf_probe as i64,
+                params.batch_size as i64,
+                params.n_full_scores as i64,
+                index.nbits,
+                params.top_k,
+                device,
+                subset_tensor.as_ref(),
+                false,
+            )
+            .map_err(|e| anyhow!("search failed for query_index={}: {}", query_index, e))?;
+
+            results.push(QueryResult {
+                query_id: query_index as usize,
+                passage_ids,
+                scores,
+            });
+        }
+    }
 
     Ok(results)
 }
@@ -313,51 +346,84 @@ pub fn search_many_with_token_scores(
         );
     };
 
-    let search_closure = |query_index| {
-        let query_embedding = queries.i(query_index).to(device);
+    let queries_on_device = queries.to_device(device);
 
-        let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
-        let subset_tensor = query_subset.map(|ids| {
-            Tensor::from_slice(ids)
-                .to_device(device)
-                .to_kind(Kind::Int64)
-        });
+    let mut results: Vec<QueryResultWithTokenScores> = Vec::with_capacity(num_queries as usize);
 
-        let (passage_ids, scores, token_matrices) = search(
-            &query_embedding,
-            ivf_index,
-            &index.codec,
-            query_dim,
-            &index.doc_codes_strided,
-            &index.doc_residuals_strided,
-            params.n_ivf_probe as i64,
-            params.batch_size as i64,
-            params.n_full_scores as i64,
-            index.nbits,
-            params.top_k,
-            device,
-            subset_tensor.as_ref(),
-            true,
-        )
-        .unwrap_or_default();
-
-        QueryResultWithTokenScores {
-            query_id: query_index as usize,
-            passage_ids,
-            scores,
-            token_scores_inner: token_matrices.unwrap_or_default(),
-        }
-    };
-
-    let results = if show_progress {
+    if show_progress {
         let bar = ProgressBar::new(num_queries.try_into().unwrap());
-        (0..num_queries)
-            .progress_with(bar)
-            .map(search_closure)
-            .collect()
+        for query_index in (0..num_queries).progress_with(bar) {
+            let query_embedding = queries_on_device.i(query_index);
+
+            let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
+            let subset_tensor = query_subset.map(|ids| {
+                Tensor::from_slice(ids)
+                    .to_device(device)
+                    .to_kind(Kind::Int64)
+            });
+
+            let (passage_ids, scores, token_matrices) = search(
+                &query_embedding,
+                ivf_index,
+                &index.codec,
+                query_dim,
+                &index.doc_codes_strided,
+                &index.doc_residuals_strided,
+                params.n_ivf_probe as i64,
+                params.batch_size as i64,
+                params.n_full_scores as i64,
+                index.nbits,
+                params.top_k,
+                device,
+                subset_tensor.as_ref(),
+                true,
+            )
+            .map_err(|e| anyhow!("search failed for query_index={}: {}", query_index, e))?;
+
+            results.push(QueryResultWithTokenScores {
+                query_id: query_index as usize,
+                passage_ids,
+                scores,
+                token_scores_inner: token_matrices.unwrap_or_default(),
+            });
+        }
     } else {
-        (0..num_queries).map(search_closure).collect()
-    };
+        for query_index in 0..num_queries {
+            let query_embedding = queries_on_device.i(query_index);
+
+            let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
+            let subset_tensor = query_subset.map(|ids| {
+                Tensor::from_slice(ids)
+                    .to_device(device)
+                    .to_kind(Kind::Int64)
+            });
+
+            let (passage_ids, scores, token_matrices) = search(
+                &query_embedding,
+                ivf_index,
+                &index.codec,
+                query_dim,
+                &index.doc_codes_strided,
+                &index.doc_residuals_strided,
+                params.n_ivf_probe as i64,
+                params.batch_size as i64,
+                params.n_full_scores as i64,
+                index.nbits,
+                params.top_k,
+                device,
+                subset_tensor.as_ref(),
+                true,
+            )
+            .map_err(|e| anyhow!("search failed for query_index={}: {}", query_index, e))?;
+
+            results.push(QueryResultWithTokenScores {
+                query_id: query_index as usize,
+                passage_ids,
+                scores,
+                token_scores_inner: token_matrices.unwrap_or_default(),
+            });
+        }
+    }
 
     Ok(results)
 }
@@ -511,9 +577,7 @@ pub fn search(
             }
         } else {
             // Standard path: top-k centroids per query token.
-            let (cell_ids, _) = codec
-                .centroids_index
-                .topk(query_embeddings, n_ivf_probe)?;
+            let (cell_ids, _) = codec.centroids_index.topk(query_embeddings, n_ivf_probe)?;
             cell_ids.flatten(0, -1).contiguous()
         };
 
@@ -658,8 +722,9 @@ pub fn search(
 
         let token_matrices = if return_token_scores {
             let sorted_token_scores = token_scores_3d.index_select(0, &sorted_indices);
-            let sorted_doc_lengths: Vec<i64> =
-                final_doc_lengths.index_select(0, &sorted_indices).try_into()?;
+            let sorted_doc_lengths: Vec<i64> = final_doc_lengths
+                .index_select(0, &sorted_indices)
+                .try_into()?;
 
             let mut matrices = Vec::with_capacity(result_count);
             for i in 0..result_count {

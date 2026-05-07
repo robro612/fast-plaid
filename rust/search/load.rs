@@ -50,9 +50,9 @@ pub struct Metadata {
 fn extract_param_dict(dict: &Bound<'_, PyDict>) -> PyResult<Vec<(String, ParamValue)>> {
     let mut out = Vec::with_capacity(dict.len());
     for (key, value) in dict.iter() {
-        let key_str: String = key.extract().map_err(|_| {
-            PyValueError::new_err("centroid_index_params keys must be strings")
-        })?;
+        let key_str: String = key
+            .extract()
+            .map_err(|_| PyValueError::new_err("centroid_index_params keys must be strings"))?;
         // Try int first (covers Python bools too — exclude them explicitly).
         let value = if value.is_instance_of::<pyo3::types::PyBool>() {
             return Err(PyValueError::new_err(format!(

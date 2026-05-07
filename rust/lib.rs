@@ -22,8 +22,8 @@ use winapi::um::libloaderapi::LoadLibraryA;
 // Internal module imports.
 use crate::index::create::create_index;
 use crate::index::delete::delete_from_index;
-use crate::index::update::update_index;
 use crate::index::maxivf_cagra::maxivf_cagra_anchors;
+use crate::index::update::update_index;
 use search::load::{construct_index, get_device, PyLoadedIndex};
 use search::search::{
     search_many, search_many_with_token_scores, QueryResult, QueryResultWithTokenScores,

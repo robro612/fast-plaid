@@ -3,9 +3,9 @@
 #[cfg(feature = "cagra")]
 mod hnsw_backend;
 
-use anyhow::{Result, anyhow};
 #[cfg(feature = "cagra")]
 use anyhow::Context;
+use anyhow::{anyhow, Result};
 use tch::{Device, Tensor};
 
 #[cfg(feature = "cagra")]
@@ -38,9 +38,7 @@ impl Default for HnswBuildParams {
 #[derive(Debug, Clone, Copy)]
 pub enum CentroidIndexConfig {
     Dense,
-    Hnsw {
-        params: HnswBuildParams,
-    },
+    Hnsw { params: HnswBuildParams },
 }
 
 impl Default for CentroidIndexConfig {
@@ -50,11 +48,7 @@ impl Default for CentroidIndexConfig {
 }
 
 /// Names of the parameter keys recognized for graph backends (`cagra`).
-pub const HNSW_PARAM_KEYS: &[&str] = &[
-    "graph_degree",
-    "intermediate_graph_degree",
-    "itopk_size",
-];
+pub const HNSW_PARAM_KEYS: &[&str] = &["graph_degree", "intermediate_graph_degree", "itopk_size"];
 
 /// A single user-provided parameter value. The pyfunction layer extracts
 /// each entry of the parameter dict into one of these variants so the
@@ -76,18 +70,12 @@ impl ParamValue {
                         v
                     ))
                 } else if *v > u32::MAX as i64 {
-                    Err(anyhow!(
-                        "centroid_index param '{}' exceeds u32::MAX",
-                        key
-                    ))
+                    Err(anyhow!("centroid_index param '{}' exceeds u32::MAX", key))
                 } else {
                     Ok(*v as u32)
                 }
-            }
-            ParamValue::Str(_) => Err(anyhow!(
-                "centroid_index param '{}' must be an integer",
-                key
-            )),
+            },
+            ParamValue::Str(_) => Err(anyhow!("centroid_index param '{}' must be an integer", key)),
         }
     }
 }
@@ -117,7 +105,7 @@ impl CentroidIndexConfig {
                     }
                 }
                 Ok(Self::Dense)
-            }
+            },
             "cagra" => {
                 let mut hp = HnswBuildParams::default();
                 if let Some(iter) = params {
@@ -127,7 +115,7 @@ impl CentroidIndexConfig {
                             "graph_degree" => hp.m = value.as_u32(&key)?,
                             "intermediate_graph_degree" => {
                                 hp.ef_construction = value.as_u32(&key)?
-                            }
+                            },
                             "itopk_size" => hp.ef_search = value.as_u32(&key)?,
                             other => {
                                 return Err(anyhow!(
@@ -135,7 +123,7 @@ impl CentroidIndexConfig {
                                     other,
                                     HNSW_PARAM_KEYS
                                 ));
-                            }
+                            },
                         }
                     }
                 }
@@ -152,13 +140,10 @@ impl CentroidIndexConfig {
                     ));
                 }
                 if hp.ef_search < 1 {
-                    return Err(anyhow!(
-                        "itopk_size must be >= 1, got {}",
-                        hp.ef_search
-                    ));
+                    return Err(anyhow!("itopk_size must be >= 1, got {}", hp.ef_search));
                 }
                 Ok(Self::Hnsw { params: hp })
-            }
+            },
             other => Err(anyhow!(
                 "unknown centroid_index kind '{}': expected 'dense' or 'cagra'",
                 other
@@ -178,7 +163,10 @@ pub(crate) fn dense_like_topk(centroids: &Tensor, queries: &Tensor, k: i64) -> (
 }
 
 #[cfg(not(feature = "cagra"))]
-fn centroid_index_try_build_hnsw(_params: HnswBuildParams, _centroids: Tensor) -> Result<CentroidIndex> {
+fn centroid_index_try_build_hnsw(
+    _params: HnswBuildParams,
+    _centroids: Tensor,
+) -> Result<CentroidIndex> {
     Err(anyhow!(
         "centroid_index='cagra' requires rebuilding fast_plaid_rust with the Cargo feature `cagra` \
          (links cuVS). Pass e.g. `maturin develop --features cagra`."
@@ -186,15 +174,15 @@ fn centroid_index_try_build_hnsw(_params: HnswBuildParams, _centroids: Tensor) -
 }
 
 #[cfg(feature = "cagra")]
-fn centroid_index_try_build_hnsw(params: HnswBuildParams, centroids: Tensor) -> Result<CentroidIndex> {
+fn centroid_index_try_build_hnsw(
+    params: HnswBuildParams,
+    centroids: Tensor,
+) -> Result<CentroidIndex> {
     let hnsw = hnsw_backend::HnswCentroidState::build_centroids(&centroids, &params).with_context(
         || "failed to build CAGRA centroid index — ensure cuVS is installed and CUDA is available",
     )?;
 
-    Ok(CentroidIndex::Hnsw {
-        centroids,
-        hnsw,
-    })
+    Ok(CentroidIndex::Hnsw { centroids, hnsw })
 }
 
 /// Abstraction over the centroid lookup used during search.
@@ -234,7 +222,9 @@ impl CentroidIndex {
     ) -> Result<Self> {
         match config {
             CentroidIndexConfig::Dense => Ok(Self::dense(centroids)),
-            CentroidIndexConfig::Hnsw { params } => centroid_index_try_build_hnsw(params, centroids),
+            CentroidIndexConfig::Hnsw { params } => {
+                centroid_index_try_build_hnsw(params, centroids)
+            },
         }
     }
 
@@ -244,10 +234,7 @@ impl CentroidIndex {
         match self {
             CentroidIndex::Dense { centroids } => Ok(dense_like_topk(centroids, queries, k)),
             #[cfg(feature = "cagra")]
-            CentroidIndex::Hnsw {
-                centroids,
-                hnsw,
-            } => hnsw.topk_centroids(centroids, queries, k),
+            CentroidIndex::Hnsw { centroids, hnsw } => hnsw.topk_centroids(centroids, queries, k),
         }
     }
 

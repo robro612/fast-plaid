@@ -350,6 +350,12 @@ def _construct_index_from_tensors(
         Passing params with ``centroid_index="dense"`` (or ``"brute"``) is an
         error. Unknown keys raise.
 
+        For ``centroid_index="cagra"``, libcuvs search-kernel choice can be
+        overridden with env ``FASTPLAID_CAGRA_CENTROID_SEARCH_ALGO`` (``auto``,
+        ``single``, ``multi``, ``multi_tuned``). Small query batches may be
+        padded to at least 256 rows (repeat along batch); override with
+        ``FASTPLAID_CAGRA_CENTROID_QUERY_PAD_TO``. See Rust ``hnsw_backend.rs``.
+
     """
     gpu_data: dict[str, Any] = {}
     for key, val in data.items():
