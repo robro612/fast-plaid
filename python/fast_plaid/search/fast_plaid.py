@@ -6,6 +6,7 @@ import json
 import math
 import os
 import threading
+import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -635,7 +636,11 @@ class FastPlaid:
             primary_device = self.devices[0]
 
             method = (self.anchor_method or "kmeans").lower()
+            _phase_anchor_s: float | None = None
+            _phase_compress_s: float | None = None
+            _phase_centroid_build_s: float | None = None
             if method in ("kmeans",):
+                _t0 = _time.perf_counter()
                 centroids = compute_kmeans(
                     documents_embeddings=documents_embeddings,
                     dim=dim,
@@ -646,6 +651,7 @@ class FastPlaid:
                     seed=seed,
                     use_triton_kmeans=use_triton_kmeans,
                 )
+                _phase_anchor_s = _time.perf_counter() - _t0
             elif method == "maxivf_cagra":
                 p = dict(self.anchor_params or {})
                 empty_handling = str(p.get("empty_handling", "sticky")).lower()
@@ -654,6 +660,7 @@ class FastPlaid:
                         f"anchor_params['empty_handling']={empty_handling!r}; expected one of "
                         "'sticky', 'reseed', 'prune'."
                     )
+                _t0 = _time.perf_counter()
                 centroids = fast_plaid_rust.maxivf_cagra_anchors(
                     embeddings=documents_embeddings,
                     device=primary_device,
@@ -667,11 +674,13 @@ class FastPlaid:
                     normalize_anchors=bool(p.get("normalize_anchors", True)),
                     empty_handling=empty_handling,
                 ).to(device=primary_device, dtype=torch.float16)
+                _phase_anchor_s = _time.perf_counter() - _t0
             else:
                 raise ValueError(
                     f"Unknown anchor_method '{self.anchor_method}'; expected 'kmeans' or 'maxIVF_cagra'"
                 )
 
+            _t0 = _time.perf_counter()
             fast_plaid_rust.create(
                 index=self.index,
                 torch_path=self.torch_path,
@@ -684,6 +693,7 @@ class FastPlaid:
                 seed=seed,
                 compress_only=compress_only,
             )
+            _phase_compress_s = _time.perf_counter() - _t0
 
             # Explicit cleanup of create objects
             del centroids
@@ -695,6 +705,7 @@ class FastPlaid:
             # Note: centroid_index_params must be threaded through here too — the search-time
             # reload only fires on mtime change, so without this the CAGRA centroid index would
             # be built using HnswBuildParams::default values for the rest of this object's life.
+            _t0 = _time.perf_counter()
             new_indices = _reload_index(
                 index_path=self.index,
                 devices=self.devices,
@@ -703,11 +714,19 @@ class FastPlaid:
                 centroid_index=self.centroid_index,
                 centroid_index_params=self.centroid_index_params,
             )
+            _phase_centroid_build_s = _time.perf_counter() - _t0
 
             # Atomic swap of indices dictionary
             with self._index_swap_lock:
                 self.indices = new_indices
                 self._update_mtime()
+
+            # Phase timings for external inspection (e.g. experiment harness).
+            self._last_add_phase_s = {
+                "anchor_train_s": _phase_anchor_s,
+                "ivf_compress_s": _phase_compress_s,
+                "centroid_build_s": _phase_centroid_build_s,
+            }
 
         return self
 

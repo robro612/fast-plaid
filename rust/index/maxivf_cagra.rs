@@ -450,6 +450,39 @@ pub fn maxivf_cagra_anchors_impl(
 
         let nz = counts_flat.eq(0.0).nonzero();
         let n_empty = nz.size()[0] as usize;
+
+        // Log cluster-size distribution for diagnostics (non-empty clusters only).
+        // Hypothesis: recall loss is driven by heavy-tailed mega-clusters, not just empties.
+        {
+            let nonempty_counts = counts_flat
+                .masked_select(&counts_flat.gt(0.0))
+                .to_device(Device::Cpu)
+                .to_kind(Kind::Float);
+            let n_nonempty = nonempty_counts.size()[0] as usize;
+            if n_nonempty > 0 {
+                let sorted = nonempty_counts.sort(0, false).0; // ascending
+                let n64 = n_nonempty as i64;
+                let get = |i: i64| -> i64 { sorted.double_value(&[i]).round() as i64 };
+                let min_c = get(0);
+                let max_c = get(n64 - 1);
+                let p50_c = get(n64 / 2);
+                let p90_c = get(((n64 as f64 * 0.9) as i64).min(n64 - 1));
+                let total: f64 = sorted.sum(Kind::Float).double_value(&[]);
+                let mean_c = total / n_nonempty as f64;
+                // Gini = (2 * Σ(rank * count) - (N+1) * Σcount) / (N * Σcount)
+                // where rank is 1-based index into sorted ascending order.
+                let ranks: Vec<f32> = (1..=n_nonempty).map(|i| i as f32).collect();
+                let rank_t = Tensor::from_slice(&ranks).to_device(Device::Cpu);
+                let weighted: f64 = (rank_t * sorted.to_kind(Kind::Float)).sum(Kind::Float).double_value(&[]);
+                let gini = (2.0 * weighted - (n_nonempty as f64 + 1.0) * total)
+                    / (n_nonempty as f64 * total);
+                eprintln!(
+                    "[fast-plaid][maxIVF_cagra][iter {}/{}] cluster sizes: n_nonempty={} min={} p50={} p90={} max={} mean={:.1} gini={:.3}",
+                    iter + 1, n_iter, n_nonempty, min_c, p50_c, p90_c, max_c, mean_c, gini
+                );
+            }
+        }
+
         if n_empty > 0 {
             match empty_handling {
                 EmptyHandling::Sticky => {
