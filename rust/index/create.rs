@@ -531,12 +531,15 @@ pub fn create_index(
 
     // Build global IVF (skipped in compress_only mode)
     if !compress_only {
-        let all_codes = Tensor::zeros(&[total_num_embeddings as i64], (Kind::Int64, device));
+        // Keep codes on CPU: CUDA merge_sort hits cudaErrorIllegalAddress at large
+        // corpus sizes (≥200M tokens) due to workspace overflow on some GPU models.
+        // IVF build is a one-time operation so CPU performance is acceptable.
+        let all_codes = Tensor::zeros(&[total_num_embeddings as i64], (Kind::Int64, Device::Cpu));
 
         for chunk_index in 0..n_chunks {
             let chk_offset_global = chk_emb_offsets[chunk_index];
             let codes_fpath = Path::new(index_path).join(format!("{}.codes.npy", chunk_index));
-            let codes_from_file = Tensor::read_npy(&codes_fpath)?.to_device(device);
+            let codes_from_file = Tensor::read_npy(&codes_fpath)?;
             let count = codes_from_file.size()[0];
             all_codes
                 .narrow(0, chk_offset_global as i64, count)
@@ -547,7 +550,7 @@ pub fn create_index(
         let code_counts = sorted_codes.bincount::<Tensor>(None, est_total_embeddings);
 
         let (opt_ivf, opt_inverted_file_lengths) =
-            optimize_ivf(&sorted_indices, &code_counts, index_path, device)
+            optimize_ivf(&sorted_indices, &code_counts, index_path, Device::Cpu)
                 .context("Failed to optimize IVF")?;
 
         let opt_ivf_fpath = Path::new(index_path).join("ivf.npy");
