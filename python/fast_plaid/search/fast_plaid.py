@@ -371,7 +371,14 @@ class FastPlaid:
             ``intermediate_graph_degree`` (int, default 64),
             ``itopk_size`` (int, default 128),
             ``token_batch_size`` (int, default 65536),
-            ``normalize_anchors`` (bool, default True).
+            ``normalize_anchors`` (bool, default True). Optional environment overrides
+            for the libcuvs assignment search (same family of workarounds as centroid
+            CAGRA): ``FASTPLAID_CAGRA_MAXIVF_SEARCH_ALGO`` (``auto``, ``single``, ``multi``,
+            ``multi_tuned``) and ``FASTPLAID_CAGRA_MAXIVF_QUERY_PAD_TO`` (minimum query
+            batch rows; small batches are padded by repeating rows). Empty clusters keep
+            their previous anchor by default (avoids degenerate all-zero rows). Set
+            ``FASTPLAID_CAGRA_MAXIVF_RESEED_EMPTY=1`` to random re-seed empties instead. See
+            ``rust/index/maxivf_cagra.rs``.
         kwargs:
             Additional keyword arguments.
 
@@ -641,6 +648,12 @@ class FastPlaid:
                 )
             elif method == "maxivf_cagra":
                 p = dict(self.anchor_params or {})
+                empty_handling = str(p.get("empty_handling", "sticky")).lower()
+                if empty_handling not in ("sticky", "reseed", "prune"):
+                    raise ValueError(
+                        f"anchor_params['empty_handling']={empty_handling!r}; expected one of "
+                        "'sticky', 'reseed', 'prune'."
+                    )
                 centroids = fast_plaid_rust.maxivf_cagra_anchors(
                     embeddings=documents_embeddings,
                     device=primary_device,
@@ -652,6 +665,7 @@ class FastPlaid:
                     token_batch_size=int(p.get("token_batch_size", 65536)),
                     seed=int(p.get("seed", seed)) if p.get("seed", None) is not None else int(seed),
                     normalize_anchors=bool(p.get("normalize_anchors", True)),
+                    empty_handling=empty_handling,
                 ).to(device=primary_device, dtype=torch.float16)
             else:
                 raise ValueError(
@@ -677,13 +691,17 @@ class FastPlaid:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            # Reload indices on all devices now that creation is complete
+            # Reload indices on all devices now that creation is complete.
+            # Note: centroid_index_params must be threaded through here too — the search-time
+            # reload only fires on mtime change, so without this the CAGRA centroid index would
+            # be built using HnswBuildParams::default values for the rest of this object's life.
             new_indices = _reload_index(
                 index_path=self.index,
                 devices=self.devices,
                 indices={},
                 low_memory=self.low_memory,
                 centroid_index=self.centroid_index,
+                centroid_index_params=self.centroid_index_params,
             )
 
             # Atomic swap of indices dictionary
