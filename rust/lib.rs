@@ -1,5 +1,6 @@
 // Local library modules.
 pub mod index;
+pub mod profile;
 pub mod search;
 pub mod utils;
 
@@ -7,6 +8,7 @@ pub mod utils;
 use anyhow::anyhow;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 use pyo3_tch::PyTensor;
 use tch::Kind;
 
@@ -23,6 +25,7 @@ use winapi::um::libloaderapi::LoadLibraryA;
 use crate::index::create::create_index;
 use crate::index::delete::delete_from_index;
 use crate::index::update::update_index;
+use crate::profile::ProfileSpan;
 use search::load::{construct_index, get_device, PyLoadedIndex};
 use search::search::{
     search_many, search_many_with_token_scores, QueryResult, QueryResultWithTokenScores,
@@ -363,6 +366,45 @@ fn delete(
     result
 }
 
+/// Begin collecting Rust tracing spans for subsequent normal search calls.
+#[pyfunction]
+fn begin_profile() {
+    profile::begin();
+}
+
+/// Drain PyLate-compatible Rust tracing span trees collected since `begin_profile`.
+#[pyfunction]
+fn take_profile<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+    let roots = profile::take();
+    let out = PyList::empty(py);
+    for root in roots {
+        out.append(profile_span_to_dict(py, &root)?)?;
+    }
+    Ok(out)
+}
+
+fn profile_span_to_dict<'py>(py: Python<'py>, span: &ProfileSpan) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
+    dict.set_item("name", &span.name)?;
+    dict.set_item("dur_ns", span.dur_ns)?;
+    dict.set_item("device", &span.device)?;
+    dict.set_item("count", span.count)?;
+
+    let meta = PyDict::new(py);
+    for (key, value) in &span.meta {
+        meta.set_item(key, value)?;
+    }
+    dict.set_item("meta", meta)?;
+
+    let children = PyList::empty(py);
+    for child in &span.children {
+        children.append(profile_span_to_dict(py, child)?)?;
+    }
+    dict.set_item("children", children)?;
+
+    Ok(dict)
+}
+
 #[pymodule]
 #[pyo3(name = "fast_plaid_rust")]
 fn python_module(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -379,5 +421,7 @@ fn python_module(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(update, m)?)?;
     m.add_function(wrap_pyfunction!(delete, m)?)?;
     m.add_function(wrap_pyfunction!(reconstruct_embeddings, m)?)?;
+    m.add_function(wrap_pyfunction!(begin_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(take_profile, m)?)?;
     Ok(())
 }

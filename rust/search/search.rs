@@ -239,15 +239,28 @@ pub fn search_many(
     };
 
     let search_closure = |query_index| {
-        let query_embedding = queries.i(query_index).to(device);
+        let _search_span = tracing::info_span!(
+            "search",
+            query_index = query_index,
+            top_k = params.top_k,
+            n_ivf_probe = params.n_ivf_probe,
+            n_full_scores = params.n_full_scores,
+            batch_size = params.batch_size,
+        )
+        .entered();
+        let (query_embedding, subset_tensor) = {
+            let _span = tracing::info_span!("query_prepare").entered();
+            let query_embedding = queries.i(query_index).to(device);
 
-        // Handle the per-query subset list
-        let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
-        let subset_tensor = query_subset.map(|ids| {
-            Tensor::from_slice(ids)
-                .to_device(device)
-                .to_kind(Kind::Int64)
-        });
+            // Handle the per-query subset list
+            let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
+            let subset_tensor = query_subset.map(|ids| {
+                Tensor::from_slice(ids)
+                    .to_device(device)
+                    .to_kind(Kind::Int64)
+            });
+            (query_embedding, subset_tensor)
+        };
 
         let (passage_ids, scores, _) = search(
             &query_embedding,
@@ -314,14 +327,28 @@ pub fn search_many_with_token_scores(
     };
 
     let search_closure = |query_index| {
-        let query_embedding = queries.i(query_index).to(device);
+        let _search_span = tracing::info_span!(
+            "search",
+            query_index = query_index,
+            top_k = params.top_k,
+            n_ivf_probe = params.n_ivf_probe,
+            n_full_scores = params.n_full_scores,
+            batch_size = params.batch_size,
+            return_token_scores = true,
+        )
+        .entered();
+        let (query_embedding, subset_tensor) = {
+            let _span = tracing::info_span!("query_prepare").entered();
+            let query_embedding = queries.i(query_index).to(device);
 
-        let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
-        let subset_tensor = query_subset.map(|ids| {
-            Tensor::from_slice(ids)
-                .to_device(device)
-                .to_kind(Kind::Int64)
-        });
+            let query_subset = subset.as_ref().and_then(|s| s.get(query_index as usize));
+            let subset_tensor = query_subset.map(|ids| {
+                Tensor::from_slice(ids)
+                    .to_device(device)
+                    .to_kind(Kind::Int64)
+            });
+            (query_embedding, subset_tensor)
+        };
 
         let (passage_ids, scores, token_matrices) = search(
             &query_embedding,
@@ -488,63 +515,76 @@ pub fn search(
         let query_embeddings_unsqueezed = query_embeddings.unsqueeze(0);
 
         // Compute query-centroid scores
-        let query_centroid_scores = codec.centroids.matmul(&query_embeddings.transpose(0, 1));
+        let query_centroid_scores = {
+            let _span = tracing::info_span!("centroid_score").entered();
+            codec.centroids.matmul(&query_embeddings.transpose(0, 1))
+        };
 
         // Select IVF cells to probe
-        let flat_cells_to_probe = if let Some(subset_tensor) = subset {
-            // Subset optimization: restrict to centroids containing subset documents
-            let (subset_doc_codes, _) = doc_codes_strided.lookup(subset_tensor, device);
+        let flat_cells_to_probe = {
+            let _span = tracing::info_span!("ivf_select", n_ivf_probe = n_ivf_probe).entered();
+            if let Some(subset_tensor) = subset {
+                // Subset optimization: restrict to centroids containing subset documents
+                let (subset_doc_codes, _) = doc_codes_strided.lookup(subset_tensor, device);
 
-            if subset_doc_codes.numel() == 0 {
-                Tensor::empty(&[0], (Kind::Int64, device))
-            } else {
-                let (unique_subset_centroids, _, _) = subset_doc_codes
-                    .flatten(0, -1)
-                    .unique_dim(0, true, false, false);
-
-                let subset_scores = query_centroid_scores.index_select(0, &unique_subset_centroids);
-                let available_centroids = unique_subset_centroids.size()[0];
-                let actual_k = n_ivf_probe.min(available_centroids);
-
-                let top_indices_local = if actual_k == 1 {
-                    subset_scores.argmax(0, true)
+                if subset_doc_codes.numel() == 0 {
+                    Tensor::empty(&[0], (Kind::Int64, device))
                 } else {
-                    subset_scores.topk(actual_k, 0, true, false).1
-                };
+                    let (unique_subset_centroids, _, _) = subset_doc_codes
+                        .flatten(0, -1)
+                        .unique_dim(0, true, false, false);
 
-                let flat_local_indices = top_indices_local.flatten(0, -1);
-                unique_subset_centroids.index_select(0, &flat_local_indices)
-            }
-        } else {
-            // Standard path
-            let selected_ivf_cells_indices = if n_ivf_probe == 1 {
-                query_centroid_scores.argmax(0, true).permute(&[1, 0])
+                    let subset_scores =
+                        query_centroid_scores.index_select(0, &unique_subset_centroids);
+                    let available_centroids = unique_subset_centroids.size()[0];
+                    let actual_k = n_ivf_probe.min(available_centroids);
+
+                    let top_indices_local = if actual_k == 1 {
+                        subset_scores.argmax(0, true)
+                    } else {
+                        subset_scores.topk(actual_k, 0, true, false).1
+                    };
+
+                    let flat_local_indices = top_indices_local.flatten(0, -1);
+                    unique_subset_centroids.index_select(0, &flat_local_indices)
+                }
             } else {
-                query_centroid_scores
-                    .topk(n_ivf_probe, 0, true, false)
-                    .1
-                    .permute(&[1, 0])
-            };
-            selected_ivf_cells_indices.flatten(0, -1).contiguous()
+                // Standard path
+                let selected_ivf_cells_indices = if n_ivf_probe == 1 {
+                    query_centroid_scores.argmax(0, true).permute(&[1, 0])
+                } else {
+                    query_centroid_scores
+                        .topk(n_ivf_probe, 0, true, false)
+                        .1
+                        .permute(&[1, 0])
+                };
+                selected_ivf_cells_indices.flatten(0, -1).contiguous()
+            }
         };
 
         let (unique_ivf_cells_to_probe, _, _) =
             flat_cells_to_probe.unique_dim(-1, true, false, false);
 
         // Retrieve candidate documents via IVF lookup
-        let (retrieved_passage_ids_ivf, _) =
-            ivf_index_strided.lookup(&unique_ivf_cells_to_probe, device);
+        let (retrieved_passage_ids_ivf, _) = {
+            let _span = tracing::info_span!("ivf_lookup").entered();
+            ivf_index_strided.lookup(&unique_ivf_cells_to_probe, device)
+        };
 
-        let (sorted_passage_ids_ivf, _) = retrieved_passage_ids_ivf.sort(0, false);
+        let unique_passage_ids = {
+            let _span = tracing::info_span!("candidate_dedup").entered();
+            let (sorted_passage_ids_ivf, _) = retrieved_passage_ids_ivf.sort(0, false);
 
-        let (mut unique_passage_ids, _, _) =
-            sorted_passage_ids_ivf.unique_consecutive(false, false, 0);
+            let (mut unique_passage_ids, _, _) =
+                sorted_passage_ids_ivf.unique_consecutive(false, false, 0);
 
-        // Filter to subset if provided
-        if let Some(subset_tensor) = subset {
-            unique_passage_ids =
-                filter_passage_ids_with_subset(&unique_passage_ids, subset_tensor, device);
-        }
+            // Filter to subset if provided
+            if let Some(subset_tensor) = subset {
+                unique_passage_ids =
+                    filter_passage_ids_with_subset(&unique_passage_ids, subset_tensor, device);
+            }
+            unique_passage_ids
+        };
 
         if unique_passage_ids.numel() == 0 {
             return Ok((vec![], vec![], None));
@@ -554,6 +594,8 @@ pub fn search(
         let mut approx_score_chunks = Vec::new();
         let total_passage_ids_for_approx = unique_passage_ids.size()[0];
         let num_approx_batches = (total_passage_ids_for_approx + batch_size - 1) / batch_size;
+        let approx_lookup_span = tracing::info_span!("approx_lookup");
+        let approx_score_span = tracing::info_span!("approx_score");
 
         for step in 0..num_approx_batches {
             let batch_start = step * batch_size;
@@ -564,8 +606,10 @@ pub fn search(
 
             let batch_passage_ids =
                 unique_passage_ids.narrow(0, batch_start, batch_end - batch_start);
-            let (batch_packed_codes, batch_doc_lengths) =
-                doc_codes_strided.lookup(&batch_passage_ids, device);
+            let (batch_packed_codes, batch_doc_lengths) = {
+                let _guard = approx_lookup_span.enter();
+                doc_codes_strided.lookup(&batch_passage_ids, device)
+            };
 
             if batch_packed_codes.numel() == 0 {
                 approx_score_chunks.push(Tensor::zeros(
@@ -575,20 +619,27 @@ pub fn search(
                 continue;
             }
 
-            let batch_approx_scores = query_centroid_scores.index_select(0, &batch_packed_codes);
+            let padded_approx_scores = {
+                let _guard = approx_score_span.enter();
+                let batch_approx_scores =
+                    query_centroid_scores.index_select(0, &batch_packed_codes);
 
-            let (padded_approx_scores, mask) =
-                direct_pad_sequences(&batch_approx_scores, &batch_doc_lengths, 0.0, device)?;
+                let (padded_approx_scores, mask) =
+                    direct_pad_sequences(&batch_approx_scores, &batch_doc_lengths, 0.0, device)?;
 
-            let padded_approx_scores = colbert_score_reduce(&padded_approx_scores, &mask);
+                colbert_score_reduce(&padded_approx_scores, &mask)
+            };
 
             approx_score_chunks.push(padded_approx_scores);
         }
 
-        let mut approx_scores = if !approx_score_chunks.is_empty() {
-            Tensor::cat(&approx_score_chunks, 0)
-        } else {
-            Tensor::empty(&[0], (Kind::Float, device))
+        let mut approx_scores = {
+            let _guard = approx_score_span.enter();
+            if !approx_score_chunks.is_empty() {
+                Tensor::cat(&approx_score_chunks, 0)
+            } else {
+                Tensor::empty(&[0], (Kind::Float, device))
+            }
         };
 
         if approx_scores.size().get(0) != Some(&unique_passage_ids.size()[0]) {
@@ -602,20 +653,33 @@ pub fn search(
         let mut passage_ids_to_rerank = unique_passage_ids;
 
         // Prune candidates for re-ranking
-        if n_docs_for_full_score < approx_scores.size()[0] && approx_scores.numel() > 0 {
-            let (top_scores, top_indices) =
-                approx_scores.topk(n_docs_for_full_score, 0, true, true);
+        {
+            let _span =
+                tracing::info_span!("approx_topk", n_full_scores = n_docs_for_full_score).entered();
+            if n_docs_for_full_score < approx_scores.size()[0] && approx_scores.numel() > 0 {
+                let (top_scores, top_indices) =
+                    approx_scores.topk(n_docs_for_full_score, 0, true, true);
 
-            passage_ids_to_rerank = passage_ids_to_rerank.index_select(0, &top_indices);
-            approx_scores = top_scores;
+                passage_ids_to_rerank = passage_ids_to_rerank.index_select(0, &top_indices);
+                approx_scores = top_scores;
+            }
         }
 
         // Further reduce candidates for decompression
         let n_passage_ids_for_decompression = (n_docs_for_full_score / 4).max(1);
-        if n_passage_ids_for_decompression < approx_scores.size()[0] && approx_scores.numel() > 0 {
-            let (_, top_indices) =
-                approx_scores.topk(n_passage_ids_for_decompression, 0, true, true);
-            passage_ids_to_rerank = passage_ids_to_rerank.index_select(0, &top_indices);
+        {
+            let _span = tracing::info_span!(
+                "decompress_topk",
+                n_docs_for_decompression = n_passage_ids_for_decompression,
+            )
+            .entered();
+            if n_passage_ids_for_decompression < approx_scores.size()[0]
+                && approx_scores.numel() > 0
+            {
+                let (_, top_indices) =
+                    approx_scores.topk(n_passage_ids_for_decompression, 0, true, true);
+                passage_ids_to_rerank = passage_ids_to_rerank.index_select(0, &top_indices);
+            }
         }
 
         if passage_ids_to_rerank.numel() == 0 {
@@ -623,10 +687,14 @@ pub fn search(
         }
 
         // Full decompression and exact scoring
-        let (final_codes, final_doc_lengths) =
-            doc_codes_strided.lookup(&passage_ids_to_rerank, device);
+        let (final_codes, final_doc_lengths, final_residuals) = {
+            let _span = tracing::info_span!("exact_lookup").entered();
+            let (final_codes, final_doc_lengths) =
+                doc_codes_strided.lookup(&passage_ids_to_rerank, device);
 
-        let (final_residuals, _) = doc_residuals_strided.lookup(&passage_ids_to_rerank, device);
+            let (final_residuals, _) = doc_residuals_strided.lookup(&passage_ids_to_rerank, device);
+            (final_codes, final_doc_lengths, final_residuals)
+        };
 
         let bucket_weights = codec
             .bucket_weights
@@ -637,52 +705,77 @@ pub fn search(
                 anyhow!("Codec missing bucket_weight_indices_lookup for decompression.")
             })?;
 
-        let decompressed_embeddings = decompress_residuals(
-            &final_residuals,
-            bucket_weights,
-            &codec.byte_reversed_bits_map,
-            bucket_weight_indices_lookup,
-            &final_codes,
-            &codec.centroids,
-            embedding_dimension,
-            nbits_param,
-        );
+        let decompressed_embeddings = {
+            let _span = tracing::info_span!("residual_decompress").entered();
+            decompress_residuals(
+                &final_residuals,
+                bucket_weights,
+                &codec.byte_reversed_bits_map,
+                bucket_weight_indices_lookup,
+                &final_codes,
+                &codec.centroids,
+                embedding_dimension,
+                nbits_param,
+            )
+        };
 
-        let (padded_doc_embeddings, mask) =
-            direct_pad_sequences(&decompressed_embeddings, &final_doc_lengths, 0.0, device)?;
+        let (token_scores_3d, reduced_scores) = {
+            let _span = tracing::info_span!("exact_score").entered();
+            let (padded_doc_embeddings, mask) =
+                direct_pad_sequences(&decompressed_embeddings, &final_doc_lengths, 0.0, device)?;
 
-        let token_scores_3d =
-            padded_doc_embeddings.matmul(&query_embeddings_unsqueezed.transpose(-2, -1));
-        let reduced_scores = colbert_score_reduce(&token_scores_3d, &mask);
+            let token_scores_3d =
+                padded_doc_embeddings.matmul(&query_embeddings_unsqueezed.transpose(-2, -1));
+            let reduced_scores = colbert_score_reduce(&token_scores_3d, &mask);
+            (token_scores_3d, reduced_scores)
+        };
 
         // Final top-k sort
-        let (reduced_scores, sorted_indices) = reduced_scores.sort(0, true);
+        let (reduced_scores, sorted_indices, sorted_passage_ids) = {
+            let _span = tracing::info_span!("final_topk", top_k = top_k).entered();
+            let (reduced_scores, sorted_indices) = reduced_scores.sort(0, true);
 
-        let sorted_passage_ids = passage_ids_to_rerank.index_select(0, &sorted_indices);
+            let sorted_passage_ids = passage_ids_to_rerank.index_select(0, &sorted_indices);
+            (reduced_scores, sorted_indices, sorted_passage_ids)
+        };
 
-        let sorted_passage_ids: Vec<i64> = sorted_passage_ids.try_into()?;
-        let reduced_scores: Vec<f32> = reduced_scores.try_into()?;
+        let (sorted_passage_ids, reduced_scores, result_count, token_matrices) = {
+            let _span = tracing::info_span!(
+                "result_materialize",
+                return_token_scores = return_token_scores
+            )
+            .entered();
+            let sorted_passage_ids: Vec<i64> = sorted_passage_ids.try_into()?;
+            let reduced_scores: Vec<f32> = reduced_scores.try_into()?;
 
-        let result_count = top_k.min(sorted_passage_ids.len());
+            let result_count = top_k.min(sorted_passage_ids.len());
 
-        let token_matrices = if return_token_scores {
-            let sorted_token_scores = token_scores_3d.index_select(0, &sorted_indices);
-            let sorted_doc_lengths: Vec<i64> =
-                final_doc_lengths.index_select(0, &sorted_indices).try_into()?;
+            let token_matrices = if return_token_scores {
+                let sorted_token_scores = token_scores_3d.index_select(0, &sorted_indices);
+                let sorted_doc_lengths: Vec<i64> = final_doc_lengths
+                    .index_select(0, &sorted_indices)
+                    .try_into()?;
 
-            let mut matrices = Vec::with_capacity(result_count);
-            for i in 0..result_count {
-                let doc_len = sorted_doc_lengths[i];
-                // [max_doc_len, query_len] → [doc_len, query_len] → [query_len, doc_len]
-                let mat = sorted_token_scores
-                    .i(i as i64)
-                    .narrow(0, 0, doc_len)
-                    .transpose(0, 1);
-                matrices.push(mat);
-            }
-            Some(matrices)
-        } else {
-            None
+                let mut matrices = Vec::with_capacity(result_count);
+                for i in 0..result_count {
+                    let doc_len = sorted_doc_lengths[i];
+                    // [max_doc_len, query_len] → [doc_len, query_len] → [query_len, doc_len]
+                    let mat = sorted_token_scores
+                        .i(i as i64)
+                        .narrow(0, 0, doc_len)
+                        .transpose(0, 1);
+                    matrices.push(mat);
+                }
+                Some(matrices)
+            } else {
+                None
+            };
+            (
+                sorted_passage_ids,
+                reduced_scores,
+                result_count,
+                token_matrices,
+            )
         };
 
         Ok((
